@@ -2,7 +2,7 @@
 library(sf)
 library(rgdal)
 library(raster)
-library(Climate)
+library(ClimateNA)
 library(sp)
 
 # Load the LiDAR data
