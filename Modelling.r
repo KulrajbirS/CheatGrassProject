@@ -22,7 +22,7 @@ clim_variables <- as.data.frame(lapply(clim_variables, function(x) as.numeric(as
 # Transform the rasters to BC Albers projection
 clim_variables_albers <- projectRaster(clim_variables, crs = "+init=epsg:3005")
 
-# Load the NDVI and multispectral bands
+# Load the NDVI
 ndvi <- raster("Multispectral_ndvi.tif")
 
 # Create a DEM from the BC Albers LiDAR, using the same cell size and extents as the NDVI and MS data
@@ -30,7 +30,7 @@ dem_albers <- raster::raster(lidar_data)
 res(dem_albers) <- res(ndvi)
 extent(dem_albers) <- extent(ndvi)
 
-# Resample all layers to fit within the bounds of the NDVI and multispectral bands
+# Resample all layers to fit within the bounds of the NDVI
 dem_albers <- resample(dem_albers, ndvi)
 clim_variables_albers <- resample(clim_variables_albers, ndvi)
 
@@ -49,8 +49,7 @@ field_points <- spTransform(field_points, CRS("+init=epsg:3005"))
 # Extract raster data for these points
 field_points@data <- extract(clim_variables_albers, field_points)
 
-# Now you can proceed with creating your models
 
-# For instance, for a linear model:
+# For instance, using a linear model:
 lm_result <- lm(variable ~ ., data = field_points@data)
 summary(lm_result)
