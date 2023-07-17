@@ -20,12 +20,6 @@ raw_las <- list.files(raw_dir, pattern = ".las$", full.names = TRUE)
 ### I moved this from below, it can stay up at the top as a placeholder to
 ### get the information on the resolution of the NDVI
 
-# Load the NDVI
-### Use the "terra" package instead (i.e.: the "rast()" function)
-# ndvi <- raster("Multispectral_ndvi.tif")
-
-ndvi <- rast(list.files(raw_dir, pattern = "ndvi.tif$", full.names = TRUE))
-
 # Now read in the las file
 lidar_data <- readLAS(raw_las)
 
@@ -96,7 +90,22 @@ lidar_clean <- catalog_map(lidar_tiles, ctg_clean)
 
 # Create DEM using lidR package functions
 lidar_clean <- readLAScatalog(clean_dir, chunk_buffer = 10.5)
-dem <- rasterize_terrain(lidar_clean, res = res(ndvi)[1], algorithm = tin())
+dem <- rasterize_terrain(lidar_clean, res = 0.5, algorithm = tin())
+
+# Now, need to create a common boundary since both DEM and NDVI have slightly 
+# different bounds. Load NDVI here:
+ndvi <- rast(list.files(raw_dir, pattern = "ndvi.tif$", full.names = TRUE))
+
+# Get common extent
+ext_n <- ext(ndvi)
+ext_d <- ext(dem)
+ext_c <- ext(c(min(c(xmin(ext_n), xmin(ext_d))), max(c(xmax(ext_n), xmax(ext_d))),
+               min(c(ymin(ext_n), ymin(ext_d))), max(c(ymax(ext_n), ymax(ext_d)))))
+
+# Resample NDVI layer to the new extent
+ndvi_dummy <- rast(extent = ext_c, crs = crs(ndvi), resolution = 0.5)
+ndvi <- resample(ndvi, ndvi_dummy)
+dem <- extend(dem, ext_c)
 
 # Reproject DEM to WGS84 projection and save as a .asc file
 dem_wgs84 <- project(dem, "EPSG:4326", threads = TRUE)
@@ -128,6 +137,7 @@ ClimateNA_cmdLine(
 # Use climateNAr function "rasterStack" to access rasters and convert to 
 # necessary numerical values
 layer_ids <- list.files(file.path(climate_dir, "Normal_1991_2020Y"))
+layer_ids <- layer_ids[!layer_ids %in% c("DD1040.asc", "MAR.asc")]
 climate_layers_wgs84 <- rast(ClimateNAr::rasterStack(
   file.path(climate_dir, "Normal_1991_2020Y"), varList = layer_ids, 
   rType = "grid", vConvert = TRUE))
@@ -135,12 +145,10 @@ climate_layers_wgs84 <- rast(ClimateNAr::rasterStack(
 # Project back to BC Albers
 climate_out <- file.path("./05_climate_tif")
 dir.create(climate_out, showWarnings = FALSE)
-climate_layers <- project(climate_layers_wgs84, "EPSG:3005", 
-                          filename = paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers), ".tif"))
-
-# # Write these as .tif files
-# writeRaster(climate_layers, paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers), ".tif"),
-#             names = paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers)))
+climate_layers <- project(climate_layers_wgs84, dem, method = "bilinear", threads = TRUE) |> 
+  writeRaster(paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers_wgs84), ".tif"),
+              names = paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers_wgs84)),
+              overwrite = TRUE)
 
 # Create a DEM for the WGS84 projection and write it to a .asc file
 ### This is not how to create a DEM, see above.
@@ -162,20 +170,23 @@ climate_layers <- project(climate_layers_wgs84, "EPSG:3005",
 # res(dem_albers) <- res(ndvi)
 # extent(dem_albers) <- extent(ndvi)
 
-# Resample all layers to fit within the bounds of the NDVI
-dem_albers <- resample(dem, ndvi, method = "bilinear", threads = TRUE)
-climate_layers <- resample(climate_layers, ndvi, method = "bilinear", threads = TRUE)
+
+# Load the NDVI
+### Use the "terra" package instead (i.e.: the "rast()" function)
+# ndvi <- raster("Multispectral_ndvi.tif")
+
 
 # Load the field point data
 ### I see here that you are using the sp package. Please use the sf package
 ### instead as the sp package will be deprecated.
+
 field_points <- read.csv("Survey.csv", stringsAsFactors = FALSE) |> 
   janitor::clean_names() |> 
   rename(cover = x_cover) |> 
   mutate(cover = gsub("<|>", "", cover)) |> 
   separate_wider_delim(cover, "-", names_sep = "-", too_few = "align_end") |> 
   rename(cover = last_col()) |> 
-  select(northing, westing, cover) |> 
+  dplyr::select(northing, westing, cover) |> 
   mutate(cover = as.numeric(cover),
          presence = cover > 0) |> 
   st_as_sf(coords = c("westing", "northing"), crs = 4326) |> 
@@ -193,12 +204,43 @@ field_points <- read.csv("Survey.csv", stringsAsFactors = FALSE) |>
 # Extract raster data for these points
 # field_points@data <- extract(clim_variables_albers, field_points)
 
-raster_extract <- extract(c(dem_albers, ndvi, climate_layers), vect(field_points))
+raster_extract <- terra::extract(c(dem, ndvi, climate_layers), vect(field_points),
+                                 ID = FALSE, bind = TRUE) |> 
+  st_as_sf()
 
 # For instance, using a linear model:
-lm_result <- lm(variable ~ ., data = field_points@data)
+cover_data <- st_drop_geometry(raster_extract) |> 
+  janitor::clean_names() |> 
+  dplyr::select(-presence) |> 
+  dplyr::filter(!is.na(x2023_07_10_multispectral_index_ndvi))
+lm_result <- lm(cover ~ x2023_07_10_multispectral_index_ndvi, data = cover_data)
 summary(lm_result)
 
 # Use the linear model to create a map prediction
-raster_model <- predict(c(dem_albers, ndvi, climate_layers), lm_result, 
-                        filename = "cheatgrass_model.tif", overwrite = TRUE)
+full_data <- c(ndvi)
+raster_model <- terra::predict(full_data, lm_result)
+
+# Attempt a random forest classification model using ranger
+pres_data <- st_drop_geometry(raster_extract) |> 
+  dplyr::select(-cover) |> 
+  janitor::clean_names() |> 
+  dplyr::filter(!is.na(x2023_07_10_multispectral_index_ndvi))
+
+library(ranger)
+rgr_result <- ranger(presence ~ `x2023_07_10_multispectral_index_ndvi`, data = pres_data,
+                     probability = TRUE, keep.inbag = TRUE)
+full_data <- c(ndvi)
+names(full_data) <- janitor::make_clean_names(names(full_data))
+
+rgr_model <- terra::predict(full_data, rgr_result, na.rm = TRUE)
+writeRaster(rgr_model, filename = c("cheatgrass_model_presence_probs.tif",
+                                    "cheatgrass_model_absence_probs.tif"),
+            names = c("presence_probs", "absence_probs"), overwrite = TRUE)
+
+### I learned from this exercise that the following things need to happen:
+
+# 1. Generate LAS file from the multispectral, not the orthomosaic
+# 2. Rerun all above code
+# 3. Add other MS indices (GNDVI, LCI, etc.) as these seem to be the best
+#    predictors of presence
+# 4. Add terrain layers.
