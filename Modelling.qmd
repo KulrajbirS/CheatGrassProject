@@ -1,0 +1,73 @@
+
+```{r}
+library(caret)
+library(mlr)
+library(tidyverse)
+library(sf)
+library(terra)
+library(janitor)
+library(ranger)
+```
+
+```{r}
+# Cell 1: Load NDVI and Field Data
+raw_dir <- file.path("./01_raw")
+ndvi <- rast(list.files(raw_dir, pattern = "ndvi.tif$", full.names = TRUE))
+
+field_points <- read.csv("Survey.csv", stringsAsFactors = FALSE) |> 
+  janitor::clean_names() |> 
+  rename(cover = x_cover) |> 
+  mutate(cover = gsub("<|>", "", cover)) |> 
+  separate_wider_delim(cover, "-", names_sep = "-", too_few = "align_end") |> 
+  rename(cover = last_col()) |> 
+  dplyr::select(northing, westing, cover) |> 
+  mutate(cover = as.numeric(cover),
+         presence = cover > 0) |> 
+  st_as_sf(coords = c("westing", "northing"), crs = 4326) |> 
+  st_transform(3005)
+```
+
+```{r}
+# Cell 2: Extract Raster Data for Points
+raster_extract <- terra::extract(c(dem, ndvi, climate_layers), vect(field_points),
+                                 ID = FALSE, bind = TRUE) |> 
+  st_as_sf()
+```
+
+```{r}
+# Cell 3: Linear Model
+cover_data <- st_drop_geometry(raster_extract) |> 
+  janitor::clean_names() |> 
+  dplyr::select(-presence) |> 
+  dplyr::filter(!is.na(x2023_07_10_multispectral_index_ndvi))
+lm_result <- lm(cover ~ x2023_07_10_multispectral_index_ndvi, data = cover_data)
+summary(lm_result)
+```
+
+```{r}
+# Cell 4: Linear Model Prediction
+full_data <- c(ndvi)
+raster_model <- terra::predict(full_data, lm_result)
+```
+
+```{r}
+# Cell 5: Random Forest Model
+pres_data <- st_drop_geometry(raster_extract) |> 
+  dplyr::select(-cover) |> 
+  janitor::clean_names() |> 
+  dplyr::filter(!is.na(x2023_07_10_multispectral_index_ndvi))
+
+rgr_result <- ranger(presence ~ `x2023_07_10_multispectral_index_ndvi`, data = pres_data,
+                     probability = TRUE, keep.inbag = TRUE)
+```
+
+```{r}
+# Cell 6: Random Forest Model Prediction
+full_data <- c(ndvi)
+names(full_data) <- janitor::make_clean_names(names(full_data))
+
+rgr_model <- terra::predict(full_data, rgr_result, na.rm = TRUE)
+writeRaster(rgr_model, filename = c("cheatgrass_model_presence_probs.tif",
+                                    "cheatgrass_model_absence_probs.tif"),
+            names = c("presence_probs", "absence_probs"), overwrite = TRUE)
+```
