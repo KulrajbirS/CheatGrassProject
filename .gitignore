@@ -48,6 +48,11 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 
-# LAS and TIF files
-.las
-.tif
+# Spatial file types
+*.las
+*.asc
+*.tif
+*.sgrd
+*.sdat
+*.xml
+*.prj
