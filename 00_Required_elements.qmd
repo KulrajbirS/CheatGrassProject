@@ -1,0 +1,74 @@
+---
+title: "00_Required_elements"
+format: html
+editor: visual
+---
+
+# Required elements
+
+This document will outline and download the required downloads for running the rest of the codes that follow. This will include software (ClimateBC, SAGA GIS) and R packages.
+
+## Folder Initialization
+
+Here, a list of folders will be created on your machine. Those working on this project have access to the required LAS and multispectral TIF files. Those files need to manually be copy/pasted to the "01_raw" folder for consistency.
+
+```{r Folder_Init}
+dir_list <- c("01_raw", "02_las_tiles", "03_las_cleaned", "04_climate_wgs84", "05_climate_tif", "06_terrain_sgrd", "07_terrain_tif", "08_multispectral_tif", "09_models_tif")
+
+sapply(dir_list, dir.create, showWarnings = FALSE)
+
+```
+
+## R packages
+
+```{r}
+# Get number of cores on your machine
+cpus <- as.numeric(Sys.getenv("NUMBER_OF_PROCESSORS"))
+
+# List of CRAN packages
+ls <- c("tidyverse", "lidR", "terra", "sf", "ranger", "mlr3verse",
+        "Rsagacmd", "future")
+
+new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
+if(length(new_packages)) 
+  install.packages(new_packages, Ncpus = cpus)
+
+# ClimateNAr package
+ls <- "ClimateNAr"[!("ClimateNAr" %in% installed.packages()[, "Package"])]
+if(length(new_packages)) {
+  url <- "https://climatena.ca/downloads/ClimateNAr.zip"
+  download.file(url, destfile = file.path(tempdir(), basename(url)))
+  install.packages(file.path(tempdir(), basename(url)), repos = NULL,
+                   type = "source", Ncpus = cpus)
+}
+```
+
+## ClimateBC V7.40 (July 17, 2023)
+
+ClimateBC can be stored anywhere you like on your PC. Note: This is a Windows only program; however, it may also be used on other OS's following their guidelines. Updating should be a matter of simply changing the version number in the URL below and running the chunk again.
+
+```{r ClimateBC}
+
+url <- "https://media.forestry.ubc.ca/ClimateNA/Packages/ClimateBC/Climatebc_v740.zip"
+dl_dir <- "ClimateBC"
+dir.create(dl_dir, showWarnings = FALSE)
+download.file(url, destfile = file.path(dl_dir, basename(url)))
+unzip(file.path(dl_dir, basename(url)),
+      exdir = file.path(dl_dir, gsub(".zip$", "", basename(url))))
+
+
+```
+
+## SAGA GIS
+
+For SAGA GIS to work within the R packages its used by, it is recommended to download SAGA to your base folder on your hard drive (e.g.: C:/SAGA-GIS).
+
+```{r SAGA_GIS}
+url <- "https://versaweb.dl.sourceforge.net/project/saga-gis/SAGA%20-%209/SAGA%20-%209.1.0/saga-9.1.0_x64.zip"
+dl_dir <- file.path(Sys.getenv("SystemDrive"), "SAGA-GIS")
+dir.create(dl_dir, showWarnings = FALSE)
+download.file(url, destfile = file.path(dl_dir, basename(url)))
+unzip(file.path(dl_dir, basename(url)),
+      exdir = file.path(dl_dir, gsub(".zip$", "", basename(url))))
+
+```

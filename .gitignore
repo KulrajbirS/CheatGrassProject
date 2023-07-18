@@ -56,3 +56,6 @@ rsconnect/
 *.sdat
 *.xml
 *.prj
+
+# Folders
+/ClimateBC
