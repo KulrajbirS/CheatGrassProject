@@ -1,0 +1,41 @@
+
+```{r}
+library(tidyverse)
+library(sf)
+library(terra)
+library(ClimateNAr)
+```
+
+```{r}
+# Create Directory
+climate_dir <- file.path("./04_climate_wgs84")
+dir.create(climate_dir, showWarnings = FALSE)
+```
+
+```{r}
+ClimateNA_cmdLine(
+  exe = "ClimateBC_v7.40.exe",
+  wkDir = normalizePath("C:/Users/matth/Downloads/Climatebc_v740/"),
+  period = "Normal_1991_2020.nrm", MSY = "Y",
+  inputFile = normalizePath("C:/Users/matth/Documents/GitHub/CheatGrassProject/dem_wgs84.asc"),
+  outputFile = normalizePath("C:/Users/matth/Documents/GitHub/CheatGrassProject/04_climate_wgs84/")
+)
+```
+
+```{r}
+layer_ids <- list.files(file.path(climate_dir, "Normal_1991_2020Y"))
+layer_ids <- layer_ids[!layer_ids %in% c("DD1040.asc", "MAR.asc")]
+climate_layers_wgs84 <- rast(ClimateNAr::rasterStack(
+  file.path(climate_dir, "Normal_1991_2020Y"), varList = layer_ids, 
+  rType = "grid", vConvert = TRUE))
+```
+
+```{r}
+climate_out <- file.path("./05_climate_tif")
+dir.create(climate_out, showWarnings = FALSE)
+dem <- rast("dem_wgs84.asc")
+climate_layers <- project(climate_layers_wgs84, dem, method = "bilinear", threads = TRUE) |> 
+  writeRaster(paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers_wgs84), ".tif"),
+              names = paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers_wgs84)),
+              overwrite = TRUE)
+```
