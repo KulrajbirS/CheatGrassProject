@@ -1,0 +1,84 @@
+
+```{r}
+# Required libraries
+library(lidR)
+library(future)
+library(tidyverse)
+library(sf)
+library(terra)
+```
+
+
+```{r}
+# Cell 2: Load the lidar_tiles object from the file
+raw_dir <- file.path("./01_raw")
+lidar_tiles <- readRDS("lidar_tiles.rds")
+```
+
+
+```{r}
+# Cell 3: Cleaning function
+ctg_clean <- function(las) {
+  las <- classify_noise(las, ivf(res = 4, n = 15))
+  las <- filter_poi(las, Classification != LASNOISE)
+  las <- classify_ground(las, csf())
+  return(las)
+}
+```
+
+
+```{r}
+# Cell 4: Directory creation and output file path
+clean_dir <- file.path("./03_cleaned")
+dir.create(clean_dir, showWarnings = FALSE)
+opt_output_files(lidar_tiles) <- file.path(clean_dir, "{ID}")
+```
+
+
+```{r}
+# Cell 5: Catalog map application
+plan(multisession, workers = availableCores() / 2)
+set_lidr_threads(2)
+lidar_clean <- catalog_map(lidar_tiles, ctg_clean)
+```
+
+
+```{r}
+# Cell 6: Read cleaned LAS catalog and rasterize terrain
+lidar_clean <- readLAScatalog(clean_dir, chunk_buffer = 10.5)
+dem <- rasterize_terrain(lidar_clean, res = 0.5, algorithm = tin())
+```
+
+
+```{r}
+# Cell 7: Load NDVI
+ndvi <- rast(list.files(raw_dir, pattern = "ndvi.tif$", full.names = TRUE))
+```
+
+```{r}
+# Cell 8: Common boundary, resampling, reprojecting
+ext_n <- ext(ndvi)
+ext_d <- ext(dem)
+ext_c <- ext(c(min(c(xmin(ext_n), xmin(ext_d))), max(c(xmax(ext_n), xmax(ext_d))),
+               min(c(ymin(ext_n), ymin(ext_d))), max(c(ymax(ext_n), ymax(ext_d)))))
+
+ndvi_dummy <- rast(extent = ext_c, crs = crs(ndvi), resolution = 0.5)
+ndvi <- resample(ndvi, ndvi_dummy)
+dem <- extend(dem, ext_c)
+```
+
+```{r}
+# Cell 9: DEM re-projection and saving
+dem_wgs84 <- project(dem, "EPSG:4326", threads = TRUE)
+writeRaster(dem_wgs84, "dem_wgs84.asc", overwrite = TRUE, NAflag = -9999)
+plan(sequential)
+```
+
+```{r}
+# Cell 10: File processing
+txt <- readLines("dem_wgs84.asc")
+txt <- gsub("-9999.0", "-9999", txt)
+f <- file("dem_wgs84.asc", open = "wb")
+cat(txt, file = f, sep = "\r\n")
+close(f)
+```
