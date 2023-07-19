@@ -1,0 +1,2 @@
+# CheatGrassProject
+This repository is used for the spatial analysis and modelling for Aurora UAV's Cheatgrass project. At the moment, the included scripts will download the required software and R packages for doing these analyses. In the near future, machine learning models will be applied to generate maps of the probability of cheatgrass presence in an area and perhaps the predictive probability of its spread.
