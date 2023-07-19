@@ -6,7 +6,7 @@ This script will generate any set of climate variables available through Climate
 
 # Required libraries
 invisible(suppressPackageStartupMessages(
-  lapply(c("tidyverse", "terra", "ClimateNAr", "future.apply"), 
+  lapply(c("terra", "ClimateNAr", "future.apply"), 
          library, character.only = TRUE)))
 
 # Define inputs and outputs
@@ -19,7 +19,7 @@ dem_albers <- rast(file.path("./07_terrain_tif", "dem.tif"))
 
 ```
 
-ClimateBC will produce climate layers from DEM's. We can specify with a bit of text which suite of layers we want; for example, if we wanted to get the annual climate layers from any given year, we can specify that. We can also supply a list of options and have it iterate through that list. We can find the list of valid period names in the folder `ClimateBC/Climatebc_v740/Perioddat`. Each of those can have outputs as annual averages, seasonal averages, or averages given for each month.
+ClimateBC will produce climate layers from DEM's. We can specify with a bit of text which suite of layers we want; for example, if we wanted to get the annual climate layers from any given year, we can specify that. We can also supply a list of options and have it iterate through that list. We can find the list of valid period names in the folder `ClimateBC/Climatebc_v740/Perioddat` as well as `ClimateBC/Climatebc_v740/GCMdat` for future climate variables. Each of those can have outputs as annual averages (`Y`), seasonal averages (`S`), or averages given for each month (`M`). For the purposes of the function in the chunk after this one, the output of this chunk should be a table with column headings "period" and "MSY".
 
 ```{r Define_periods}
 
@@ -29,49 +29,72 @@ periods <- expand.grid(
 
 ```
 
-Now all that we need to do is iterate through our list to generate the required outputs:
+Now all that we need to do is iterate through our table to generate the required outputs. If multiple periods have been defined, we can use the `future_lapply()` function to run through our table in parallel. This works because ClimateBC is a 32 bit program that only uses a single core when loaded, and it can be loaded multiple times depending on how many cores your machine has. It also is not memory intensive, so using all your cores here is the preferred use case. The weird thing is that SpatRasters cannot serialize, so instead of passing the object into the iteration it must be loaded while iterating.
 
 ```{r ClimateBC_run}
 
+# Create the parallel instance
 plan(multisession, workers = min(availableCores(), nrow(periods)))
+
+# Iterate over each row in the "periods" table. 
 clim_layers <- future_lapply(1:nrow(periods), function(x, dem_albers_path) {
+  
+  # Load input variables and vectors
   dem <- rast(dem_albers_path)
   prd <- as.character(periods[x, ]$period)
   msy <- as.character(periods[x, ]$MSY)
+  
+  # Create a new directory using the names of the input variables. This is
+  # necessary because ClimateBC will sometimes not create proper names for
+  # their output folders.
   new_dir <- file.path(out_dir, paste0(substr(prd, 0, nchar(prd) - 4), msy))
   dir.create(new_dir, showWarnings = FALSE)
   
+  # Run the ClimateBC command line interface
   cbc_run <- ClimateNA_cmdLine(
     exe = clim_exe, wkDir = normalizePath(clim_dir),
     period = prd, MSY = msy, inputFile = normalizePath(dem_wgs84),
     outputFile = normalizePath(new_dir))
+  
+  # Move files from the subdirectory where ClimateBC saved the files to
+  # up one folder. Delete the old files and directory
   new_subdir <- list.dirs(new_dir)[list.dirs(new_dir) != new_dir]
   out_files <- list.files(new_subdir, pattern = ".asc$", full.names = TRUE)
   file.copy(out_files, new_dir, overwrite = TRUE)
   unlink(out_files)
   unlink(new_subdir)
   
+  # Load the .asc files as a SpatRaster object
   r <- rast(list.files(new_dir, pattern = ".asc", full.names = TRUE))
   
-  # Identify layers with issues, no data, or no variation
-  r_dat <- as.data.frame(minmax(r, compute = TRUE))
+  # Identify layers with issues, no data, or no variation using minmax() function
+  r_dat <- suppressWarnings(as.data.frame(minmax(r, compute = TRUE)))
   r_use <- names(which(apply(r_dat, 2, sd) > 0))
+  
+  # Subset layers to use based on valid and useful data only
   r <- r[[r_use]]
+  
+  # Pattern for math and logic copied from the rasterStack() function in the
+  # ClimateNAr package
   for(var in names(r)) {
     if(grepl("mat|mwmt|mcmt|td|emt|ext|ahm|shm|mar|ta|tm", tolower(var))) {
-      r[[var]] <- r[[var]]/10
+      r[[var]] <- r[[var]] / 10
     }
     if(grepl("cmi", tolower(var))) {
-      r[[var]] <- r[[var]]/100
+      r[[var]] <- r[[var]] / 100
     }
   }
+  
+  # Rename the grids so that each name is unique
   names(r) <- paste0(basename(new_dir), "_", names(r))
   
-  # Remove grids with no data
+  # Reproject grids to match the extent and resolution of the BC Albers DEM
   prj <- project(r, dem) |> 
     writeRaster(file.path(tif_dir, paste0(names(r), ".tif")), 
                 names = names(r), overwrite = TRUE)
   
+  # future_lapply will not return pointer objects, so just return the file paths of
+  # the output raster files.
   return(sources(prj))
 }, dem_albers_path = sources(dem_albers), future.stdout = FALSE, future.seed = NULL)
 
