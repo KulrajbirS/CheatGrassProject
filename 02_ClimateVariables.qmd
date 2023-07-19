@@ -34,7 +34,8 @@ Now all that we need to do is iterate through our list to generate the required 
 ```{r ClimateBC_run}
 
 plan(multisession, workers = min(availableCores(), nrow(periods)))
-clim_layers <- future_lapply(1:nrow(periods), function(x) {
+clim_layers <- future_lapply(1:nrow(periods), function(x, dem_albers_path) {
+  dem <- rast(dem_albers_path)
   prd <- as.character(periods[x, ]$period)
   msy <- as.character(periods[x, ]$MSY)
   new_dir <- file.path(out_dir, paste0(substr(prd, 0, nchar(prd) - 4), msy))
@@ -67,11 +68,11 @@ clim_layers <- future_lapply(1:nrow(periods), function(x) {
   names(r) <- paste0(basename(new_dir), "_", names(r))
   
   # Remove grids with no data
-  prj <- project(r, dem_albers) |> 
+  prj <- project(r, dem) |> 
     writeRaster(file.path(tif_dir, paste0(names(r), ".tif")), 
                 names = names(r), overwrite = TRUE)
   
-  return(prj)
-}, future.stdout = FALSE, future.seed = NULL)
+  return(sources(prj))
+}, dem_albers_path = sources(dem_albers), future.stdout = FALSE, future.seed = NULL)
 
 ```
