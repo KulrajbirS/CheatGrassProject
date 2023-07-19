@@ -1,0 +1,133 @@
+## LiDAR Processing
+
+This document will cover the processing of LAS files into a DEM. By the end of this document we should have 2 files: a DEM in the BC Albers projection for deriving terrain variables, and another DEM in the WGS84 projection which will be used to generate climate variables.
+
+First, load the required libraries and set some basic file paths.
+
+```{r Load_libraries}
+
+# Required libraries
+invisible(suppressPackageStartupMessages(
+  lapply(c("tidyverse", "lidR", "future", "sf", "terra"), 
+         library, character.only = TRUE)))
+
+# Set directory paths
+raw_dir <- file.path("./01_raw")
+raw_las <- list.files(raw_dir, pattern = ".las$", full.names = TRUE)
+
+```
+
+One thing that was noticed early on was that reading the raw LAS file threw a couple of warnings about invalid data. This is because it is not true LiDAR data in the sense that it was not captured using a LiDAR sensor; rather, it is derived from 2D imagery and exported from Pix4Dmapper as part of the processing to generate the orthomosaic. In the future, the LAS file will be generated from the multispectral imagery instead.
+
+```{r Fix_LAS}
+
+# Load LiDAR data
+lidar_data <- readLAS(raw_las)
+
+# Fix invalid data
+lidar_data$ReturnNumber <- 1L
+lidar_data$NumberOfReturns <- 1L
+
+# Save the LAS file
+writeLAS(lidar_data, file.path(raw_dir, "lidar_data_fixed.las"))
+
+```
+
+A common task in LiDAR processing is to split the large LAS file into smaller tiles. This allows for parallel processing to occur later on, as well as helps save on your PC's memory usage as functions are run.
+
+```{r Tile}
+
+# Load LAS file as LAScatalog object
+lidar_data <- readLAScatalog(file.path(raw_dir, "lidar_data_fixed.las"),
+                             chunk_size = 105, chunk_buffer = 0)
+
+# Set tile directory and adjust tile settings
+tile_dir <- file.path("./02_las_tile")
+opt_chunk_alignment(lidar_data) <- c(
+  floor(mean(c(lidar_data$Min.X, lidar_data$Max.X))), 
+  floor(mean(c(lidar_data$Min.Y, lidar_data$Max.Y))))
+opt_output_files(lidar_data) <- file.path(tile_dir, "{XLEFT}_{YBOTTOM}")
+
+# Set up parallel environment and tile the data
+plan(multisession, workers = availableCores())
+set_lidr_threads(1)
+lidar_tiles <- catalog_retile(lidar_data)
+
+```
+
+Now that the tiles have been created, we need to make sure that the LiDAR data is cleaned of any noise and then make sure that each point has been classified as either a ground point or not a ground point. This is accomplished through using the `csf()` algorithm within the `classify_ground()` function. CSF, or cloth simulated filter, classifies ground points by inverting the points and "draping a cloth" over the inverted points. Anywhere that the simulated cloth touches is deemed a ground point, and all other points are not ground classified. You can specify particular options within here (e.g.: sloop_smooth is used in the case of steep slopes). There are other ground classification algorithms, but this is a very common one to use because most of the parameters can be left in their default state for most applications.
+
+```{r Clean}
+
+# Define the cleaning and ground classification function
+ctg_clean <- function(las) {
+  las <- classify_noise(las, ivf(res = 4, n = 15))
+  las <- filter_poi(las, Classification != LASNOISE)
+  las <- classify_ground(las, csf(sloop_smooth = TRUE))
+  return(las)
+}
+
+# Load the LAS tiles
+lidar_tiles <- readLAScatalog(tile_dir, chunk_buffer = 10.5)
+
+# Directory definition and output file path
+clean_dir <- file.path("./03_las_cleaned")
+opt_output_files(lidar_tiles) <- file.path(clean_dir, "{ID}")
+
+# Run custom function in parallel
+plan(multisession, workers = availableCores() / 2)
+set_lidr_threads(2)
+lidar_clean <- catalog_map(lidar_tiles, ctg_clean)
+
+```
+
+With cleaned and defined LAS tiles, we can now generate a DEM. This DEM will be in the BC Albers projection since that is what the projection of the LAS tiles is in, but we will also need to reproject that to the WGS84 coordinate system afterwards.
+
+We want to make sure that the boundaries of this DEM are common between the multispectral data and the newly produced DEM, so one of the raw reflectance tiles will be loaded here to get its extent. The extent will be the largest possible boundary between the LAS catalog and the loaded reflectance layer.
+
+```{r Produce_DEM}
+# Read reflectance files and get their extent
+rfl <- rast(list.files(raw_dir, pattern = "reflectance", full.names = TRUE))
+rfl_ext <- ext(rfl)
+
+# Read cleaned LAS catalog and get its extent
+lidar_clean <- readLAScatalog(clean_dir, chunk_buffer = 10.5)
+lidar_ext <- ext(lidar_clean)
+
+# Create a common extend and a dummy grid for running DEM algorithm
+common_ext <- ext(c(
+  min(c(xmin(rfl_ext), xmin(lidar_ext))), 
+  max(c(xmax(rfl_ext), xmax(lidar_ext))),
+  min(c(ymin(rfl_ext), ymin(lidar_ext))), 
+  max(c(ymax(rfl_ext), ymax(lidar_ext)))))
+
+# Dummy grid created with raster package instead of terra because of a bug
+dummy_grid <- raster::raster(rast(
+  extent = common_ext, crs = st_crs(lidar_clean)$wkt, resolution = 0.5))
+
+# Create DEM using the dummy grid
+plan(multisession, workers = availableCores() / 2)
+set_lidr_threads(2)
+dem_albers <- rast(rasterize_terrain(
+  lidar_clean, res = dummy_grid, algorithm = tin()))
+
+# Project DEM to WGS84, and provide fix for ClimateBC
+clim_out <- file.path("./04_climate_wgs84", "dem_wgs84.asc")
+dem_wgs84 <- project(dem_albers, "EPSG:4326", threads = TRUE,
+                     filename = clim_out, overwrite = TRUE, NAflag = -9999)
+txt <- readLines(clim_out)
+txt <- gsub("-9999.0", "-9999", txt)
+f <- file(clim_out, open = "wb")
+cat(txt, file = f, sep = "\r\n")
+close(f)
+
+```
+
+
+
+```{r}
+
+
+# Save the lidar_tiles object to a file
+saveRDS(lidar_tiles, "lidar_tiles.rds")
+```
