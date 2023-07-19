@@ -111,6 +111,10 @@ set_lidr_threads(2)
 dem_albers <- rast(rasterize_terrain(
   lidar_clean, res = dummy_grid, algorithm = tin()))
 
+# Write the DEM to the terrain layer folder
+terrain_dir <- file.path("./07_terrain_tif")
+writeRaster(dem_albers, file.path(terrain_dir, "dem.tif"), overwrite = TRUE)
+
 # Project DEM to WGS84, and provide fix for ClimateBC
 clim_out <- file.path("./04_climate_wgs84", "dem_wgs84.asc")
 dem_wgs84 <- project(dem_albers, "EPSG:4326", threads = TRUE,
@@ -123,11 +127,11 @@ close(f)
 
 ```
 
-
+I'm not sure why the RDS is saved at the end here.
 
 ```{r}
 
 
 # Save the lidar_tiles object to a file
-saveRDS(lidar_tiles, "lidar_tiles.rds")
+# saveRDS(lidar_tiles, "lidar_tiles.rds")
 ```
