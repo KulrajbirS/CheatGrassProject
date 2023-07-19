@@ -27,7 +27,7 @@ cpus <- as.numeric(Sys.getenv("NUMBER_OF_PROCESSORS"))
 
 # List of CRAN packages
 ls <- c("tidyverse", "lidR", "terra", "sf", "ranger", "mlr3verse",
-        "Rsagacmd", "future")
+        "Rsagacmd", "future", "future.apply")
 
 new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
 if(length(new_packages)) 
