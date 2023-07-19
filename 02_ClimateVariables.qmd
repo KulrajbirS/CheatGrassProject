@@ -1,41 +1,77 @@
+# Climate Variables
 
-```{r}
-library(tidyverse)
-library(sf)
-library(terra)
-library(ClimateNAr)
+This script will generate any set of climate variables available through ClimateBC. By the end of this script, there should be a folder of the .asc files in the WGS84 coordinate system, and a folder of .tif files in the BC Albers projection.
+
+```{r Libraries}
+
+# Required libraries
+invisible(suppressPackageStartupMessages(
+  lapply(c("tidyverse", "terra", "ClimateNAr", "future.apply"), 
+         library, character.only = TRUE)))
+
+# Define inputs and outputs
+clim_dir <- file.path("./ClimateBC/Climatebc_v740/")
+clim_exe <- "ClimateBC_v7.40.exe"
+out_dir <- file.path("./04_climate_wgs84")
+dem_wgs84 <- file.path(out_dir, "dem_wgs84.asc")
+tif_dir <- file.path("./05_climate_tif")
+dem_albers <- rast(file.path("./07_terrain_tif", "dem.tif"))
+
 ```
 
-```{r}
-# Create Directory
-climate_dir <- file.path("./04_climate_wgs84")
-dir.create(climate_dir, showWarnings = FALSE)
+ClimateBC will produce climate layers from DEM's. We can specify with a bit of text which suite of layers we want; for example, if we wanted to get the annual climate layers from any given year, we can specify that. We can also supply a list of options and have it iterate through that list. We can find the list of valid period names in the folder `ClimateBC/Climatebc_v740/Perioddat`. Each of those can have outputs as annual averages, seasonal averages, or averages given for each month.
+
+```{r Define_periods}
+
+periods <- expand.grid(
+  period = c("Normal_1991_2020.nrm", "Year_2022.ann"),
+  MSY = c("Y", "S"))
+
 ```
 
-```{r}
-ClimateNA_cmdLine(
-  exe = "ClimateBC_v7.40.exe",
-  wkDir = normalizePath("C:/Users/matth/Downloads/Climatebc_v740/"),
-  period = "Normal_1991_2020.nrm", MSY = "Y",
-  inputFile = normalizePath("C:/Users/matth/Documents/GitHub/CheatGrassProject/dem_wgs84.asc"),
-  outputFile = normalizePath("C:/Users/matth/Documents/GitHub/CheatGrassProject/04_climate_wgs84/")
-)
-```
+Now all that we need to do is iterate through our list to generate the required outputs:
 
-```{r}
-layer_ids <- list.files(file.path(climate_dir, "Normal_1991_2020Y"))
-layer_ids <- layer_ids[!layer_ids %in% c("DD1040.asc", "MAR.asc")]
-climate_layers_wgs84 <- rast(ClimateNAr::rasterStack(
-  file.path(climate_dir, "Normal_1991_2020Y"), varList = layer_ids, 
-  rType = "grid", vConvert = TRUE))
-```
+```{r ClimateBC_run}
 
-```{r}
-climate_out <- file.path("./05_climate_tif")
-dir.create(climate_out, showWarnings = FALSE)
-dem <- rast("dem_wgs84.asc")
-climate_layers <- project(climate_layers_wgs84, dem, method = "bilinear", threads = TRUE) |> 
-  writeRaster(paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers_wgs84), ".tif"),
-              names = paste0(climate_out, "/Normal_1991_2020Y_", names(climate_layers_wgs84)),
-              overwrite = TRUE)
+plan(multisession, workers = min(availableCores(), nrow(periods)))
+clim_layers <- future_lapply(1:nrow(periods), function(x) {
+  prd <- as.character(periods[x, ]$period)
+  msy <- as.character(periods[x, ]$MSY)
+  new_dir <- file.path(out_dir, paste0(substr(prd, 0, nchar(prd) - 4), msy))
+  dir.create(new_dir, showWarnings = FALSE)
+  
+  cbc_run <- ClimateNA_cmdLine(
+    exe = clim_exe, wkDir = normalizePath(clim_dir),
+    period = prd, MSY = msy, inputFile = normalizePath(dem_wgs84),
+    outputFile = normalizePath(new_dir))
+  new_subdir <- list.dirs(new_dir)[list.dirs(new_dir) != new_dir]
+  out_files <- list.files(new_subdir, pattern = ".asc$", full.names = TRUE)
+  file.copy(out_files, new_dir, overwrite = TRUE)
+  unlink(out_files)
+  unlink(new_subdir)
+  
+  r <- rast(list.files(new_dir, pattern = ".asc", full.names = TRUE))
+  
+  # Identify layers with issues, no data, or no variation
+  r_dat <- as.data.frame(minmax(r, compute = TRUE))
+  r_use <- names(which(apply(r_dat, 2, sd) > 0))
+  r <- r[[r_use]]
+  for(var in names(r)) {
+    if(grepl("mat|mwmt|mcmt|td|emt|ext|ahm|shm|mar|ta|tm", tolower(var))) {
+      r[[var]] <- r[[var]]/10
+    }
+    if(grepl("cmi", tolower(var))) {
+      r[[var]] <- r[[var]]/100
+    }
+  }
+  names(r) <- paste0(basename(new_dir), "_", names(r))
+  
+  # Remove grids with no data
+  prj <- project(r, dem_albers) |> 
+    writeRaster(file.path(tif_dir, paste0(names(r), ".tif")), 
+                names = names(r), overwrite = TRUE)
+  
+  return(prj)
+}, future.stdout = FALSE, future.seed = NULL)
+
 ```
