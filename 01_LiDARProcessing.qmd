@@ -126,12 +126,3 @@ cat(txt, file = f, sep = "\r\n")
 close(f)
 
 ```
-
-I'm not sure why the RDS is saved at the end here.
-
-```{r}
-
-
-# Save the lidar_tiles object to a file
-# saveRDS(lidar_tiles, "lidar_tiles.rds")
-```
