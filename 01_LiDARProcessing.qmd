@@ -113,7 +113,7 @@ dem_albers <- rast(rasterize_terrain(
 
 # Write the DEM to the terrain layer folder
 terrain_dir <- file.path("./07_terrain_tif")
-writeRaster(dem_albers, file.path(terrain_dir, "dem.tif"), overwrite = TRUE)
+writeRaster(dem_albers, file.path(terrain_dir, "dem.tif"))
 
 # Project DEM to WGS84, and provide fix for ClimateBC
 clim_out <- file.path("./04_climate_wgs84", "dem_wgs84.asc")
