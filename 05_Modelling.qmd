@@ -10,32 +10,127 @@ library(ranger)
 ```
 
 ```{r}
-# Cell 1: Load NDVI and Field Data
-raw_dir <- file.path("./01_raw")
-ndvi <- rast(list.files(raw_dir, pattern = "ndvi.tif$", full.names = TRUE))
+# Set workspace
+workspace_dir <- './'
 
-field_points <- read.csv("Survey.csv", stringsAsFactors = FALSE) |> 
-  janitor::clean_names() |> 
-  rename(cover = x_cover) |> 
-  mutate(cover = gsub("<|>", "", cover)) |> 
-  separate_wider_delim(cover, "-", names_sep = "-", too_few = "align_end") |> 
-  rename(cover = last_col()) |> 
-  dplyr::select(northing, westing, cover) |> 
+# Set input/output file paths
+raw_dir <- file.path(workspace_dir, "01_raw")
+output_dir <- file.path(workspace_dir, "07_terrain_tif")
+ndvi_path <- list.files(raw_dir, pattern = "ndvi.tif$", full.names = TRUE)
+dem_path <- file.path(output_dir, "dem.tif")
+slope_path <- file.path(output_dir, "slope.tif")
+aspect_path <- file.path(output_dir, "aspect.tif")
+cross_curv_path <- file.path(output_dir, "cross_curvature.tif")
+long_curv_path <- file.path(output_dir, "long_curvature.tif")
+survey_path <- file.path(workspace_dir, "Survey.csv")
+pred_output_path <- file.path(output_dir, "09_models_tif/cheatgrass_model_presence_probs.tif")
+```
+
+```{r}
+# Load NDVI and Field Data
+ndvi <- rast(ndvi_path)
+dem <- rast(dem_path)
+slope <- rast(slope_path)
+aspect <- rast(aspect_path)
+cross_curv <- rast(cross_curv_path)
+long_curv <- rast(long_curv_path)
+
+field_points <- read_csv(survey_path) %>%
+  clean_names() %>%
   mutate(cover = as.numeric(cover),
-         presence = cover > 0) |> 
-  st_as_sf(coords = c("westing", "northing"), crs = 4326) |> 
+         presence = cover > 0) %>% 
+  st_as_sf(coords = c("westing", "northing"), crs = 4326) %>% 
   st_transform(3005)
 ```
 
 ```{r}
-# Cell 2: Extract Raster Data for Points
-raster_extract <- terra::extract(c(dem, ndvi, climate_layers), vect(field_points),
-                                 ID = FALSE, bind = TRUE) |> 
-  st_as_sf()
+# Extract Raster Data for Points
+raster_extract <- terra::extract(c(dem, slope, aspect, cross_curv, long_curv), 
+                                 vect(field_points),
+                                 ID = FALSE, bind = TRUE) %>% 
+   st_as_sf()
 ```
 
 ```{r}
-# Cell 3: Linear Model
+# Create a train and test set
+set.seed(123)
+train_index <- createDataPartition(model_data$presence, p = .60, list = FALSE)
+train_set <- model_data[ train_index,]
+test_set  <- model_data[-train_index,]
+```
+
+```{r}
+# Convert presence to factor
+train_set$presence <- as.factor(train_set$presence)
+
+# Random Forest Model
+control <- trainControl(method="cv", number=10) # 10-fold cross-validation
+
+# Define the tuning grid
+tuneGrid <- expand.grid(
+  mtry = c(1:sqrt(ncol(train_set))),
+  splitrule = "gini",  # Or you could use "extratrees"
+  min.node.size = 1  # This is the default, but it could be any number you choose
+)
+
+# Train the model
+set.seed(123)
+rgr_result <- caret::train(
+  presence ~ ., 
+  data = train_set, 
+  method = "ranger", 
+  trControl = control, 
+  tuneGrid = tuneGrid, 
+  importance = 'impurity'
+)
+
+print(rgr_result) # Prints the model performance and the best value for mtry
+```
+
+```{r}
+# Variable Importance
+varImp(rgr_result)
+
+# Convert presence in the test set to factor
+test_set$presence <- as.factor(test_set$presence)
+
+# Predict
+pred <- predict(rgr_result, newdata=test_set)
+
+# Generate the confusion matrix
+confusionMatrix(pred, test_set$presence)
+```
+
+```{r}
+# Assume 'dem' is the layer with the desired resolution and extent
+desired_res <- terra::res(dem)
+desired_extent <- terra::ext(dem)
+
+# Resample NDVI layer to match the resolution and extent of dem
+ndvi <- terra::resample(ndvi, dem)
+
+# Crop NDVI layer to match the extent
+ndvi <- terra::crop(ndvi, dem)
+```
+
+```{r}
+# Stacking all the layers into a single object
+full_data <- stack(dem, slope, aspect, cross_curv, long_curv, ndvi)
+
+# Renaming the layers
+names(full_data) <- c("z", "slope", "aspect", "cross_curv", "long_curv", "ndvi")
+
+# Prediction
+rgr_model <- terra::predict(full_data, rgr_result, na.rm = TRUE)
+
+# Saving the prediction
+writeRaster(rgr_model, filename = c("cheatgrass_model_presence_probs.tif",
+                                     "cheatgrass_model_absence_probs.tif"),
+             names = c("presence_probs", "absence_probs"), overwrite = TRUE)
+```
+
+```{r}
+# Linear Model
 cover_data <- st_drop_geometry(raster_extract) |> 
   janitor::clean_names() |> 
   dplyr::select(-presence) |> 
@@ -45,29 +140,7 @@ summary(lm_result)
 ```
 
 ```{r}
-# Cell 4: Linear Model Prediction
+# Linear Model Prediction
 full_data <- c(ndvi)
 raster_model <- terra::predict(full_data, lm_result)
-```
-
-```{r}
-# Cell 5: Random Forest Model
-pres_data <- st_drop_geometry(raster_extract) |> 
-  dplyr::select(-cover) |> 
-  janitor::clean_names() |> 
-  dplyr::filter(!is.na(x2023_07_10_multispectral_index_ndvi))
-
-rgr_result <- ranger(presence ~ `x2023_07_10_multispectral_index_ndvi`, data = pres_data,
-                     probability = TRUE, keep.inbag = TRUE)
-```
-
-```{r}
-# Cell 6: Random Forest Model Prediction
-full_data <- c(ndvi)
-names(full_data) <- janitor::make_clean_names(names(full_data))
-
-rgr_model <- terra::predict(full_data, rgr_result, na.rm = TRUE)
-writeRaster(rgr_model, filename = c("cheatgrass_model_presence_probs.tif",
-                                    "cheatgrass_model_absence_probs.tif"),
-            names = c("presence_probs", "absence_probs"), overwrite = TRUE)
 ```
