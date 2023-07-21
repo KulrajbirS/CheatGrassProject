@@ -3,5 +3,47 @@
 This script will be used to derive terrain variables from a DEM. This task will primarily be accomplished by SAGA GIS.
 
 ```{r}
+library(RSAGA)
 
+# Set the path to the SAGA command line program
+saga_path <- "C:/SAGA-GIS/saga-9.1.0_x64"
+
+# Create a new RSAGA environment
+env <- rsaga.env(path = saga_path)
+
+# Set the paths for the input DEM and the output directory
+tif_dir <- "./07_terrain_tif"
+sgrd_dir <- "./06_terrain_sgrd"
+
+# Check if the output directory exists, if not, create it
+if (!dir.exists(sgrd_dir)) {
+  dir.create(sgrd_dir)
+}
+
+# Define the path for the tif file
+dem_path <- file.path(tif_dir, "dem.tif")
+
+# Define the path for the SGRD file
+sgrd_path <- file.path(sgrd_dir, "dem.sgrd")
+
+# Import the DEM from GeoTIFF to SAGA Grid format
+rsaga.geoprocessor("io_gdal", 0, list(FILES=dem_path, GRIDS=sgrd_path), env=env)
+
+# Define the paths for the derived terrain attributes
+slope_path <- file.path(sgrd_dir, "slope.sgrd")
+aspect_path <- file.path(sgrd_dir, "aspect.sgrd")
+cross_sectional_curvature_path <- file.path(sgrd_dir, "cross_curvature.sgrd")
+longitudinal_curvature_path <- file.path(sgrd_dir, "long_curvature.sgrd")
+
+# Run the slope, aspect, curvature calculation
+rsaga.geoprocessor("ta_morphometry", 0, 
+                   list(ELEVATION=sgrd_path, SLOPE=slope_path, ASPECT=aspect_path, 
+                        C_CROS=cross_sectional_curvature_path, C_LONG=longitudinal_curvature_path),
+                   env=env)
+
+# Export the calculated terrain attributes to GeoTIFF
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=slope_path, FILE=paste0(tif_dir, "/slope.tif"), FORMAT="GTiff"), env=env)
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=aspect_path, FILE=paste0(tif_dir, "/aspect.tif"), FORMAT="GTiff"), env=env)
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=cross_sectional_curvature_path, FILE=paste0(tif_dir, "/cross_curvature.tif"), FORMAT="GTiff"), env=env)
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=longitudinal_curvature_path, FILE=paste0(tif_dir, "/long_curvature.tif"), FORMAT="GTiff"), env=env)
 ```
