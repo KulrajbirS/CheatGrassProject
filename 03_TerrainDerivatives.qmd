@@ -28,7 +28,9 @@ sgrd_path <- file.path(sgrd_dir, "dem.sgrd")
 
 # Import the DEM from GeoTIFF to SAGA Grid format
 rsaga.geoprocessor("io_gdal", 0, list(FILES=dem_path, GRIDS=sgrd_path), env=env)
+```
 
+```{r}
 # Define the paths for the derived terrain attributes
 slope_path <- file.path(sgrd_dir, "slope.sgrd")
 aspect_path <- file.path(sgrd_dir, "aspect.sgrd")
@@ -36,19 +38,37 @@ cross_sectional_curvature_path <- file.path(sgrd_dir, "cross_curvature.sgrd")
 longitudinal_curvature_path <- file.path(sgrd_dir, "long_curvature.sgrd")
 profile_curvature_path <- file.path(sgrd_dir, "profile_curvature.sgrd")
 plan_curvature_path <- file.path(sgrd_dir, "plan_curvature.sgrd")
+catchment_area_path <- file.path(sgrd_dir, "catchment_area.sgrd")
 twi_path <- file.path(sgrd_dir, "twi.sgrd")   # Topographic Wetness Index
-tpi_path <- file.path(sgrd_dir, "tpi.sgrd")   # Topographic Position Index
-tri_path <- file.path(sgrd_dir, "tri.sgrd")   # Topographic Ruggedness Index
+```
 
+```{r}
 # Run the slope, aspect, curvature calculation
 rsaga.geoprocessor("ta_morphometry", 0, 
                    list(ELEVATION=sgrd_path, SLOPE=slope_path, ASPECT=aspect_path, 
-                        C_CROS=cross_sectional_curvature_path, C_LONG=longitudinal_curvature_path),
+                        C_CROS=cross_sectional_curvature_path, C_LONG=longitudinal_curvature_path, C_PROF=profile_curvature_path, C_PLAN=plan_curvature_path),
+                   env=env)
+```
+
+```{r}
+# Calculating Catchment Area
+rsaga.geoprocessor("ta_hydrology", 0, 
+                   list(ELEVATION=sgrd_path, FLOW=catchment_area_path),
                    env=env)
 
+# Calculating TWI
+rsaga.geoprocessor("ta_hydrology", 20, 
+                   list(SLOPE=slope_path, AREA=catchment_area_path, TWI=twi_path),
+                   env=env)
+```
+
+```{r}
 # Export the calculated terrain attributes to GeoTIFF
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=slope_path, FILE=paste0(tif_dir, "/slope.tif"), FORMAT="GTiff"), env=env)
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=aspect_path, FILE=paste0(tif_dir, "/aspect.tif"), FORMAT="GTiff"), env=env)
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=cross_sectional_curvature_path, FILE=paste0(tif_dir, "/cross_curvature.tif"), FORMAT="GTiff"), env=env)
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=longitudinal_curvature_path, FILE=paste0(tif_dir, "/long_curvature.tif"), FORMAT="GTiff"), env=env)
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=profile_curvature_path, FILE=paste0(tif_dir, "/profile_curvature.tif"), FORMAT="GTiff"), env=env)
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=plan_curvature_path, FILE=paste0(tif_dir, "/plan_curvature.tif"), FORMAT="GTiff"), env=env)
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=twi_path, FILE=paste0(tif_dir, "/twi.tif"), FORMAT="GTiff"), env=env)
 ```
