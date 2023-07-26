@@ -72,6 +72,13 @@ rsaga.geoprocessor("ta_morphometry", "Topographic Position Index (TPI)",
 ```
 
 ```{r}
+# Calculating TRI
+rsaga.geoprocessor("ta_morphometry", 16, 
+                   list(DEM=sgrd_path, TRI=tri_path),
+                   env=env)
+```
+
+```{r}
 # Export the calculated terrain attributes to GeoTIFF
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=slope_path, FILE=paste0(tif_dir, "/slope.tif"), FORMAT="GTiff"), env=env)
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=aspect_path, FILE=paste0(tif_dir, "/aspect.tif"), FORMAT="GTiff"), env=env)
@@ -81,4 +88,5 @@ rsaga.geoprocessor("io_gdal", 1, list(GRIDS=profile_curvature_path, FILE=paste0(
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=plan_curvature_path, FILE=paste0(tif_dir, "/plan_curvature.tif"), FORMAT="GTiff"), env=env)
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=twi_path, FILE=paste0(tif_dir, "/twi.tif"), FORMAT="GTiff"), env=env)
 rsaga.geoprocessor("io_gdal", 1, list(GRIDS=tpi_path, FILE=paste0(tif_dir, "/tpi.tif"), FORMAT="GTiff"), env=env)
+rsaga.geoprocessor("io_gdal", 1, list(GRIDS=tri_path, FILE=paste0(tif_dir, "/tri.tif"), FORMAT="GTiff"), env=env)
 ```
