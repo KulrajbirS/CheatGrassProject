@@ -34,6 +34,11 @@ slope_path <- file.path(sgrd_dir, "slope.sgrd")
 aspect_path <- file.path(sgrd_dir, "aspect.sgrd")
 cross_sectional_curvature_path <- file.path(sgrd_dir, "cross_curvature.sgrd")
 longitudinal_curvature_path <- file.path(sgrd_dir, "long_curvature.sgrd")
+profile_curvature_path <- file.path(sgrd_dir, "profile_curvature.sgrd")
+plan_curvature_path <- file.path(sgrd_dir, "plan_curvature.sgrd")
+twi_path <- file.path(sgrd_dir, "twi.sgrd")   # Topographic Wetness Index
+tpi_path <- file.path(sgrd_dir, "tpi.sgrd")   # Topographic Position Index
+tri_path <- file.path(sgrd_dir, "tri.sgrd")   # Topographic Ruggedness Index
 
 # Run the slope, aspect, curvature calculation
 rsaga.geoprocessor("ta_morphometry", 0, 
