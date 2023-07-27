@@ -1,0 +1,108 @@
+
+```{r}
+# Required Libraries
+library(caret)
+library(mlr3)
+library(mlr3tuning)
+library(mlr3learners)
+library(tidyverse)
+library(sf)
+library(terra)
+library(janitor)
+library(ranger)
+```
+
+```{r}
+# Set workspace
+workspace_dir <- './'
+
+# Set input/output file paths
+raw_dir <- file.path(workspace_dir, "01_raw")
+output_dir <- file.path(workspace_dir, "07_terrain_tif")
+ndvi_path <- list.files(raw_dir, pattern = "ndvi.tif$", full.names = TRUE)
+dem_path <- file.path(output_dir, "dem.tif")
+slope_path <- file.path(output_dir, "slope.tif")
+aspect_path <- file.path(output_dir, "aspect.tif")
+cross_curv_path <- file.path(output_dir, "cross_curvature.tif")
+long_curv_path <- file.path(output_dir, "long_curvature.tif")
+survey_path <- file.path(workspace_dir, "Survey.csv")
+pred_output_path <- file.path(output_dir, "09_models_tif/cheatgrass_model_presence_probs.tif")
+```
+
+```{r}
+# Load NDVI and Field Data
+ndvi <- rast(ndvi_path)
+dem <- rast(dem_path)
+slope <- rast(slope_path)
+aspect <- rast(aspect_path)
+cross_curv <- rast(cross_curv_path)
+long_curv <- rast(long_curv_path)
+
+field_points <- read_csv(survey_path) %>%
+  clean_names() %>%
+  mutate(cover = as.numeric(cover),
+         presence = cover > 0) %>% 
+  st_as_sf(coords = c("westing", "northing"), crs = 4326) %>% 
+  st_transform(3005)
+```
+
+```{r}
+# Convert field_points to SpatVector
+field_points_vector <- terra::vect(field_points)
+
+# Extract Raster Data for Points
+raster_extract <- terra::extract(c(dem, slope, aspect, cross_curv, long_curv), 
+                                 field_points_vector,
+                                 fun = mean, na.rm = TRUE) %>%
+    as.data.frame() %>%
+    mutate(presence = field_points$presence) %>%
+    na.omit()
+```
+
+```{r}
+# Create a train and test set
+set.seed(123)
+train_index <- createDataPartition(raster_extract$presence, p = .60, list = FALSE)
+train_set <- raster_extract[ train_index,]
+test_set  <- raster_extract[-train_index,]
+
+# Convert 'presence' to factor
+train_set$presence <- as.factor(train_set$presence)
+test_set$presence <- as.factor(test_set$presence)
+```
+
+```{r}
+# Define task
+task <- TaskClassif$new(id = "train", backend = train_set, target = "presence")
+
+# Define the model
+learner <- lrn("classif.ranger", predict_type = "prob", num.trees=500, importance = 'impurity')
+
+# Define the parameter set
+param_set <- ParamSet$new(params = list(
+  ParamInt$new("mtry", lower = 1, upper = floor(sqrt(ncol(train_set)))),
+  ParamFct$new("splitrule", levels = c("gini")),
+  ParamInt$new("min.node.size", lower = 1, upper = 100)
+))
+```
+
+```{r}
+# Define the search space
+ss <- param_set
+
+# Set up the tuning
+tuner <- tnr("grid_search")
+
+# Define the tuning instance
+tune_instance <- TuningInstanceSingleCrit$new(
+   task = task,
+   learner = learner,
+   resampling = rsmp("cv", folds = 10),
+   measure = msr("classif.ce"),
+   terminator = trm("evals", n_evals = 100),
+   search_space = ss
+)
+
+# Optimize
+tuner$optimize(tune_instance)
+```
