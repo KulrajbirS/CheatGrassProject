@@ -106,3 +106,28 @@ tune_instance <- TuningInstanceSingleCrit$new(
 # Optimize
 tuner$optimize(tune_instance)
 ```
+
+```{r}
+# Get best hyperparameters
+best_params <- tune_instance$result_learner_param_vals
+
+# Set best hyperparameters
+learner$param_set$values <- best_params
+
+# Train the learner on the task
+learner$train(task)
+```
+
+```{r}
+# Predict on test data
+test_task <- TaskClassif$new(id = "test", backend = test_set, target = "presence")
+prediction <- learner$predict(test_task)
+```
+
+```{r}
+# Performance
+perf <- prediction$score(msr("classif.ce"))
+
+# Print performance
+print(perf)
+```
