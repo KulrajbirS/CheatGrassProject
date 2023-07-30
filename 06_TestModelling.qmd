@@ -26,7 +26,7 @@ aspect_path <- file.path(output_dir, "aspect.tif")
 cross_curv_path <- file.path(output_dir, "cross_curvature.tif")
 long_curv_path <- file.path(output_dir, "long_curvature.tif")
 survey_path <- file.path(workspace_dir, "Survey.csv")
-pred_output_path <- file.path(output_dir, "09_models_tif/cheatgrass_model_presence_probs.tif")
+pred_output_path <- file.path(workspace_dir, "09_models_tif/cheatgrass_model_presence_probs.tif")
 ```
 
 ```{r}
@@ -52,7 +52,7 @@ field_points_vector <- terra::vect(field_points)
 
 # Extract Raster Data for Points
 raster_extract <- terra::extract(c(dem, slope, aspect, cross_curv, long_curv), 
-                                 field_points_vector,
+                                 field_points_vector, ID=FALSE,
                                  fun = mean, na.rm = TRUE) %>%
     as.data.frame() %>%
     mutate(presence = field_points$presence) %>%
@@ -130,4 +130,25 @@ perf <- prediction$score(msr("classif.ce"))
 
 # Print performance
 print(perf)
+```
+
+```{r}
+# Create a SpatRaster object that includes all rasters
+all_rasters <- terra::rast(list(dem, slope, aspect, cross_curv, long_curv))
+
+# Fill NA values with 0 (or any other value that makes sense in your case)
+all_rasters <- terra::ifel(is.na(all_rasters), 0, all_rasters)
+
+# Predict the probability of cheatgrass presence on each raster cell
+cheatgrass_prob_raster <- terra::predict(all_rasters, learner)
+```
+
+```{r}
+# Save the output to a tif file
+terra::writeRaster(cheatgrass_prob_raster, filename = pred_output_path, overwrite=TRUE)
+```
+
+```{r}
+# Plot the probability raster
+plot(cheatgrass_prob_raster)
 ```
