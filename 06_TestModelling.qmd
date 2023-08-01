@@ -10,6 +10,7 @@ library(sf)
 library(terra)
 library(janitor)
 library(ranger)
+library(e1071)
 ```
 
 ```{r}
@@ -25,6 +26,11 @@ slope_path <- file.path(output_dir, "slope.tif")
 aspect_path <- file.path(output_dir, "aspect.tif")
 cross_curv_path <- file.path(output_dir, "cross_curvature.tif")
 long_curv_path <- file.path(output_dir, "long_curvature.tif")
+plan_curv_path <- file.path(output_dir, "plan_curvature.tif")
+profile_curv_path <- file.path(output_dir, "profile_curvature.tif")
+tpi_path <- file.path(output_dir, "tpi.tif")
+tri_path <- file.path(output_dir, "tri.tif")
+twi_path <- file.path(output_dir, "twi.tif")
 survey_path <- file.path(workspace_dir, "Survey.csv")
 pred_output_path <- file.path(workspace_dir, "09_models_tif/cheatgrass_model_presence_probs.tif")
 ```
@@ -37,6 +43,11 @@ slope <- rast(slope_path)
 aspect <- rast(aspect_path)
 cross_curv <- rast(cross_curv_path)
 long_curv <- rast(long_curv_path)
+plan_curv <- rast(plan_curv_path)
+profile_curv <- rast(profile_curv_path)
+tpi <- rast(tpi_path)
+twi <- rast(twi_path)
+tri <- rast(tri_path)
 
 field_points <- read_csv(survey_path) %>%
   clean_names() %>%
@@ -51,7 +62,7 @@ field_points <- read_csv(survey_path) %>%
 field_points_vector <- terra::vect(field_points)
 
 # Extract Raster Data for Points
-raster_extract <- terra::extract(c(dem, slope, aspect, cross_curv, long_curv), 
+raster_extract <- terra::extract(c(dem, slope, aspect, cross_curv, long_curv, tpi, twi, tri, plan_curv, profile_curv), 
                                  field_points_vector, ID=FALSE,
                                  fun = mean, na.rm = TRUE) %>%
     as.data.frame() %>%
@@ -69,12 +80,14 @@ test_set  <- raster_extract[-train_index,]
 # Convert 'presence' to factor
 train_set$presence <- as.factor(train_set$presence)
 test_set$presence <- as.factor(test_set$presence)
-```
 
-```{r}
 # Define task
 task <- TaskClassif$new(id = "train", backend = train_set, target = "presence")
+```
 
+Random Forest Classifier
+
+```{r}
 # Define the model
 learner <- lrn("classif.ranger", predict_type = "prob", num.trees=500, importance = 'impurity')
 
@@ -82,7 +95,21 @@ learner <- lrn("classif.ranger", predict_type = "prob", num.trees=500, importanc
 param_set <- ParamSet$new(params = list(
   ParamInt$new("mtry", lower = 1, upper = floor(sqrt(ncol(train_set)))),
   ParamFct$new("splitrule", levels = c("gini")),
-  ParamInt$new("min.node.size", lower = 1, upper = 100)
+  ParamInt$new("min.node.size", lower = 1, upper = 100),
+  ParamInt$new("num.trees", lower = 100, upper = 1000)
+))
+```
+
+Support Vector Classifier
+
+```{r}
+# Define the model with type = 'C-classification'
+learner <- lrn("classif.svm", type = "C-classification", kernel = "radial", predict_type = "prob")
+
+# Define the parameter set
+param_set <- ParamSet$new(params = list(
+  ParamDbl$new("cost", lower = 0.1, upper = 10),
+  ParamDbl$new("gamma", lower = 0.1, upper = 1)
 ))
 ```
 
@@ -134,7 +161,7 @@ print(perf)
 
 ```{r}
 # Create a SpatRaster object that includes all rasters
-all_rasters <- terra::rast(list(dem, slope, aspect, cross_curv, long_curv))
+all_rasters <- terra::rast(list(dem, slope, aspect, cross_curv, long_curv, tpi, twi, tri, plan_curv, profile_curv))
 
 # Fill NA values with 0 (or any other value that makes sense in your case)
 all_rasters <- terra::ifel(is.na(all_rasters), 0, all_rasters)
