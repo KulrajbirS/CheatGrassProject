@@ -3,6 +3,7 @@
 # Required Libraries
 # library(caret)
 library(mlr3)
+library(mlr3fselect)
 library(mlr3tuning)
 library(mlr3learners)
 library(mlr3spatial)
@@ -105,8 +106,10 @@ task_raw <- as_task_classif_st(raster_extract, target = "presence", positive = "
 Random Forest Classifier
 
 ```{r}
+
 # Define the model
-lrnr <- lrn("classif.ranger", predict_type = "prob", num.trees=500, importance = 'impurity')
+lrnr <- lrn("classif.ranger", predict_type = "prob", importance = 'impurity',
+            mtry.ratio = to_tune(0.1, 1))
 
 # Define the parameter set
 param_set <- ParamSet$new(params = list(
@@ -115,19 +118,36 @@ param_set <- ParamSet$new(params = list(
   ParamInt$new("min.node.size", lower = 1, upper = 100),
   ParamInt$new("num.trees", lower = 100, upper = 1000)
 ))
+
+# Graphs and pipeops for tuning
+po_flt = po("filter", filter = flt("auc"), 
+            filter.nfeat = to_tune(5, task$ncol))
+graph = po_flt %>>% po("learner", lrnr)
+
+at = auto_tuner(
+  tuner = tnr("grid_search", resolution = 5),
+  learner = graph,
+  resampling = rsmp("repeated_spcv_coords", folds = 10, repeats = 3),
+  measure = msr("classif.ce"), 
+  terminator = trm("none"), store_tuning_instance = TRUE
+)
+rr <- resample(task_raw, at, rsmp("holdout", ratio = 1), store_models = TRUE)
+best_learner <- rr$learners[[1]]$learner
+
+
 ```
 
 Support Vector Classifier
 
 ```{r}
 # Define the model with type = 'C-classification'
-lrnr <- lrn("classif.svm", type = "C-classification", kernel = "radial", predict_type = "prob")
-
-# Define the parameter set
-param_set <- ParamSet$new(params = list(
-  ParamDbl$new("cost", lower = 0.1, upper = 10),
-  ParamDbl$new("gamma", lower = 0.1, upper = 1)
-))
+# lrnr <- lrn("classif.svm", type = "C-classification", kernel = "radial", predict_type = "prob")
+# 
+# # Define the parameter set
+# param_set <- ParamSet$new(params = list(
+#   ParamDbl$new("cost", lower = 0.1, upper = 10),
+#   ParamDbl$new("gamma", lower = 0.1, upper = 1)
+# ))
 ```
 
 ```{r include=FALSE}
@@ -159,7 +179,7 @@ param_set <- ParamSet$new(params = list(
 # lrnr$param_set$values <- best_params
 
 # Train the learner on the task
-lrnr$train(task_raw)
+# lrnr$train(task_raw)
 
 ```
 
@@ -168,7 +188,7 @@ The code below has been copy/pasted from the predict_spatial() function, and has
 ```{r}
 
 # Define function inputs
-learner = lrnr
+learner = best_learner
 task = as_task_unsupervised(covariates)
 filename = tempfile(fileext = ".tif")
 stack = task$backend$stack
