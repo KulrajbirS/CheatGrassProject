@@ -38,8 +38,9 @@ A common task in LiDAR processing is to split the large LAS file into smaller ti
 ```{r Tile}
 
 # Load LAS file as LAScatalog object
+# Set chunk_size to a smaller value for smaller tiles
 lidar_data <- readLAScatalog(file.path(raw_dir, "lidar_data_fixed.las"),
-                             chunk_size = 105, chunk_buffer = 0)
+                             chunk_size = 35, chunk_buffer = 0)
 
 # Set tile directory and adjust tile settings
 tile_dir <- file.path("./02_las_tile")
@@ -49,7 +50,7 @@ opt_chunk_alignment(lidar_data) <- c(
 opt_output_files(lidar_data) <- file.path(tile_dir, "{XLEFT}_{YBOTTOM}")
 
 # Set up parallel environment and tile the data
-plan(multisession, workers = availableCores())
+plan(multisession, workers = availableCores() / 2)
 set_lidr_threads(1)
 lidar_tiles <- catalog_retile(lidar_data)
 
@@ -68,7 +69,7 @@ ctg_clean <- function(las) {
 }
 
 # Load the LAS tiles
-lidar_tiles <- readLAScatalog(tile_dir, chunk_buffer = 10.5)
+lidar_tiles <- readLAScatalog(tile_dir, chunk_size = 35, chunk_buffer = 0)
 
 # Directory definition and output file path
 clean_dir <- file.path("./03_las_cleaned")
@@ -91,7 +92,7 @@ rfl <- rast(list.files(raw_dir, pattern = "reflectance", full.names = TRUE))
 rfl_ext <- ext(rfl)
 
 # Read cleaned LAS catalog and get its extent
-lidar_clean <- readLAScatalog(clean_dir, chunk_buffer = 10.5)
+lidar_clean <- readLAScatalog(clean_dir, chunk_buffer = 1)
 lidar_ext <- ext(lidar_clean)
 
 # Create a common extend and a dummy grid for running DEM algorithm
