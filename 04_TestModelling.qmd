@@ -30,13 +30,10 @@ ndvi_path <- list.files(raw_dir, pattern = "new_", full.names = TRUE)
 dem_path <- file.path(output_dir, "dem.tif")
 slope_path <- file.path(output_dir, "slope.tif")
 aspect_path <- file.path(output_dir, "aspect.tif")
-cross_curv_path <- file.path(output_dir, "cross_curvature.tif")
 long_curv_path <- file.path(output_dir, "long_curvature.tif")
 plan_curv_path <- file.path(output_dir, "plan_curvature.tif")
-profile_curv_path <- file.path(output_dir, "profile_curvature.tif")
 tpi_path <- file.path(output_dir, "tpi.tif")
 tri_path <- file.path(output_dir, "tri.tif")
-# twi_path <- file.path(output_dir, "twi.tif")
 survey_path <- file.path(workspace_dir, "Survey.csv")
 tif_filename = file.path(tif_models_dir, "output_raster.tif")
 shp_filename = file.path(tif_models_dir, "output_raster.shp")
@@ -161,15 +158,6 @@ input_raster <- raster(tif_filename)
 # Open PNG device with adjusted height
 png(filename = infestation_plot_path, width = 1000, height = 1100, units = "px", res = 96)
 
-# Normalize the raster values to 0-100 range
-normalize_raster <- function(r) {
-  r_min <- cellStats(r, stat = 'min')
-  r_max <- cellStats(r, stat = 'max')
-  return (r - r_min) / (r_max - r_min) * 100
-}
-
-normalized_raster <- normalize_raster(input_raster)
-
 # Define breakpoints and labels based on new criteria
 breaks <- c(0, 1, 6, 26, 51, 100)
 labels <- c("Free (0%)",
@@ -185,7 +173,7 @@ reclass_mat <- c(breaks[1], breaks[2], 1,
                  breaks[4], breaks[5], 4,
                  breaks[5], breaks[6], 5)
 
-reclassified_raster <- reclassify(normalized_raster, rcl = matrix(reclass_mat, ncol=3, byrow=TRUE))
+reclassified_raster <- reclassify(input_raster, rcl = matrix(reclass_mat, ncol=3, byrow=TRUE))
 
 # Define visually appealing colors for each category
 colors <- c("#00BFFF", "#ADFF2F", "#FFD700", "#FF8C00", "#FF0000")
