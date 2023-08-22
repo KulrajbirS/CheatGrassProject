@@ -40,7 +40,7 @@ A common task in LiDAR processing is to split the large LAS file into smaller ti
 # Load LAS file as LAScatalog object
 # Set chunk_size to a smaller value for smaller tiles
 lidar_data <- readLAScatalog(file.path(raw_dir, "lidar_data_fixed.las"),
-                             chunk_size = 35, chunk_buffer = 0)
+                             chunk_size = 250, chunk_buffer = 0)
 
 # Set tile directory and adjust tile settings
 tile_dir <- file.path("./02_las_tile")
@@ -69,11 +69,11 @@ ctg_clean <- function(las) {
 }
 
 # Load the LAS tiles
-lidar_tiles <- readLAScatalog(tile_dir, chunk_size = 35, chunk_buffer = 0)
+lidar_tiles <- readLAScatalog(tile_dir, chunk_buffer = 12.5)
 
 # Directory definition and output file path
 clean_dir <- file.path("./03_las_cleaned")
-opt_output_files(lidar_tiles) <- file.path(clean_dir, "{ID}")
+opt_output_files(lidar_tiles) <- file.path(clean_dir, "{*}")
 
 # Run custom function in parallel
 plan(multisession, workers = availableCores() / 2)
@@ -92,7 +92,7 @@ rfl <- rast(list.files(raw_dir, pattern = "reflectance", full.names = TRUE))
 rfl_ext <- ext(rfl)
 
 # Read cleaned LAS catalog and get its extent
-lidar_clean <- readLAScatalog(clean_dir, chunk_buffer = 1)
+lidar_clean <- readLAScatalog(clean_dir, chunk_buffer = 12.5)
 lidar_ext <- ext(lidar_clean)
 
 # Create a common extend and a dummy grid for running DEM algorithm
@@ -114,7 +114,7 @@ dem_albers <- rast(rasterize_terrain(
 
 # Write the DEM to the terrain layer folder
 terrain_dir <- file.path("./07_terrain_tif")
-writeRaster(dem_albers, file.path(terrain_dir, "dem.tif"))
+writeRaster(dem_albers, file.path(terrain_dir, "dem.tif"), overwrite = TRUE)
 
 # Project DEM to WGS84, and provide fix for ClimateBC
 clim_out <- file.path("./04_climate_wgs84", "dem_wgs84.asc")
