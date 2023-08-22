@@ -6,12 +6,12 @@ This script will generate any set of climate variables available through Climate
 
 # Required libraries
 invisible(suppressPackageStartupMessages(
-  lapply(c("terra", "ClimateNAr", "future.apply"), 
+  lapply(c("tidyverse", "terra", "sf", "ClimateNAr", "future.apply", "janitor"), 
          library, character.only = TRUE)))
 
 # Define inputs and outputs
-clim_dir <- file.path("./ClimateBC/Climatebc_v740/")
-clim_exe <- "ClimateBC_v7.40.exe"
+clim_dir <- file.path("./ClimateBC/Climatebc_v742/")
+clim_exe <- "ClimateBC_v7.42.exe"
 out_dir <- file.path("./04_climate_wgs84")
 dem_wgs84 <- file.path(out_dir, "dem_wgs84.asc")
 tif_dir <- file.path("./05_climate_tif")
@@ -19,7 +19,7 @@ dem_albers <- rast(file.path("./07_terrain_tif", "dem.tif"))
 
 ```
 
-ClimateBC will produce climate layers from DEM's. We can specify with a bit of text which suite of layers we want; for example, if we wanted to get the annual climate layers from any given year, we can specify that. We can also supply a list of options and have it iterate through that list. We can find the list of valid period names in the folder `ClimateBC/Climatebc_v740/Perioddat` as well as `ClimateBC/Climatebc_v740/GCMdat` for future climate variables. Each of those can have outputs as annual averages (`Y`), seasonal averages (`S`), or averages given for each month (`M`). For the purposes of the function in the chunk after this one, the output of this chunk should be a table with column headings "period" and "MSY".
+ClimateBC will produce climate layers from DEM's. We can specify with a bit of text which suite of layers we want; for example, if we wanted to get the annual climate layers from any given year, we can specify that. We can also supply a list of options and have it iterate through that list. We can find the list of valid period names in the folder `ClimateBC/Climatebc_v742/Perioddat` as well as `ClimateBC/Climatebc_v742/GCMdat` for future climate variables. Each of those can have outputs as annual averages (`Y`), seasonal averages (`S`), or averages given for each month (`M`). For the purposes of the function in the chunk after this one, the output of this chunk should be a table with column headings "period" and "MSY".
 
 ```{r Define_periods}
 
@@ -76,14 +76,15 @@ clim_layers <- future_lapply(1:nrow(periods), function(x, dem_albers_path) {
   
   # Pattern for math and logic copied from the rasterStack() function in the
   # ClimateNAr package
-  for(var in names(r)) {
-    if(grepl("mat|mwmt|mcmt|td|emt|ext|ahm|shm|mar|ta|tm", tolower(var))) {
-      r[[var]] <- r[[var]] / 10
-    }
-    if(grepl("cmi", tolower(var))) {
-      r[[var]] <- r[[var]] / 100
-    }
-  }
+  # NOTE: no longer needed as of ClimateBC version 7.41/ClimateNAr version 1.20
+  # for(var in names(r)) {
+  #   if(grepl("mat|mwmt|mcmt|td|emt|ext|ahm|shm|mar|ta|tm", tolower(var))) {
+  #     r[[var]] <- r[[var]] / 10
+  #   }
+  #   if(grepl("cmi", tolower(var))) {
+  #     r[[var]] <- r[[var]] / 100
+  #   }
+  # }
   
   # Rename the grids so that each name is unique
   names(r) <- paste0(basename(new_dir), "_", names(r))
@@ -97,5 +98,46 @@ clim_layers <- future_lapply(1:nrow(periods), function(x, dem_albers_path) {
   # the output raster files.
   return(sources(prj))
 }, dem_albers_path = sources(dem_albers), future.stdout = FALSE, future.seed = NULL)
+
+```
+
+The ClimateNAr package has a new function, "varScan", which will determine the best climate variables to use based on your suite of input data. This will be accomplished by extracting the values of each of the climate variables into a table and then running the varScan function.
+
+```{r}
+
+clim_lyrs <- rast(list.files(tif_dir, pattern = ".tif$", full.names = TRUE))
+pts <- read.csv("Survey.csv", stringsAsFactors = FALSE) %>%
+  clean_names() %>%
+  rename(cover = x_cover) %>%
+  mutate(cover = gsub("<|>", "", cover)) %>% 
+  separate_wider_delim(cover, "-", names_sep = "-", too_few = "align_end") %>% 
+  rename(cover = last_col()) %>% 
+  dplyr::select(northing, westing, cover) %>% 
+  mutate(cover = as.numeric(cover)) %>% 
+  st_as_sf(coords = c("westing", "northing"), crs = 4326) %>% 
+  st_transform(crs(clim_lyrs)) |> 
+  vect()
+clim_extr <- terra::extract(clim_lyrs, pts, ID = FALSE, fun = mean, na.rm = TRUE, 
+                     bind = TRUE) |> 
+  as.data.frame() |> 
+  na.omit()
+
+x <- select(clim_extr, -cover)
+y <- clim_extr$cover
+
+# Do the varScan function. varComb = 3 should provide enough detail. Using varComb = 4 takes too long as there are too many combinations.
+bestMod <- varScan(x, y, varComb = 3, smVar = 0, IR = FALSE)
+
+# Identify the top variables to use
+clim_list <- bestMod$list |> 
+  filter(`P-value` < 0.05) |> 
+  select(var1, var2, var3)
+
+clim_vars <- unique(c(clim_list$var1, clim_list$var2, clim_list$var3))
+
+# Remove layers that are no longer required from the folder
+all_clim <- list.files(tif_dir, pattern = ".tif$", full.names = TRUE)
+clim_rm <- all_clim[!basename(all_clim) %in% paste0(clim_vars, ".tif")]
+unlink(clim_rm)
 
 ```

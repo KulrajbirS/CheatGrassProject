@@ -36,20 +36,20 @@ if(length(new_packages))
 # ClimateNAr package
 ls <- "ClimateNAr"[!("ClimateNAr" %in% installed.packages()[, "Package"])]
 if(length(new_packages)) {
-  url <- "https://climatena.ca/downloads/ClimateNAr.zip"
+  url <- "https://climatena.ca/downloads/ClimateNAr_1.2.0.zip"
   download.file(url, destfile = file.path(tempdir(), basename(url)))
   install.packages(file.path(tempdir(), basename(url)), repos = NULL,
                    type = "source", Ncpus = cpus)
 }
 ```
 
-## ClimateBC V7.40 (July 17, 2023)
+## ClimateBC V7.42 (August 17, 2023)
 
 ClimateBC can be stored anywhere you like on your PC. Note: This is a Windows only program; however, it may also be used on other OS's following their guidelines. Updating should be a matter of simply changing the version number in the URL below and running the chunk again.
 
 ```{r ClimateBC}
 
-url <- "https://media.forestry.ubc.ca/ClimateNA/Packages/ClimateBC/Climatebc_v740.zip"
+url <- "https://media.forestry.ubc.ca/ClimateNA/Packages/Climatebc/Climatebc_v742.zip"
 dl_dir <- "ClimateBC"
 dir.create(dl_dir, showWarnings = FALSE)
 download.file(url, destfile = file.path(dl_dir, basename(url)))
