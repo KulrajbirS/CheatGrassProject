@@ -24,26 +24,30 @@ workspace_dir <- './'
 
 # Set input/output file paths
 raw_dir <- file.path(workspace_dir, "01_raw")
+clim_dir <- file.path(workspace_dir, "05_climate_tif")
 output_dir <- file.path(workspace_dir, "07_terrain_tif")
 tif_models_dir <- file.path(workspace_dir, "09_models_tif")
 ndvi_path <- list.files(raw_dir, pattern = "new_", full.names = TRUE)
-dem_path <- file.path(output_dir, "dem.tif")
-slope_path <- file.path(output_dir, "slope.tif")
-aspect_path <- file.path(output_dir, "aspect.tif")
-long_curv_path <- file.path(output_dir, "long_curvature.tif")
-plan_curv_path <- file.path(output_dir, "plan_curvature.tif")
-tpi_path <- file.path(output_dir, "tpi.tif")
-tri_path <- file.path(output_dir, "tri.tif")
+terrain_vars <- list.files(output_dir, pattern = ".tif$", full.names = TRUE) 
+clim_vars <- list.files(clim_dir, pattern = ".tif$", full.names = TRUE)
+# dem_path <- file.path(output_dir, "dem.tif")
+# slope_path <- file.path(output_dir, "slope.tif")
+# aspect_path <- file.path(output_dir, "aspect.tif")
+# long_curv_path <- file.path(output_dir, "long_curvature.tif")
+# plan_curv_path <- file.path(output_dir, "plan_curvature.tif")
+# tpi_path <- file.path(output_dir, "tpi.tif")
+# tri_path <- file.path(output_dir, "tri.tif")
 survey_path <- file.path(workspace_dir, "Survey.csv")
 tif_filename = file.path(tif_models_dir, "output_raster.tif")
 shp_filename = file.path(tif_models_dir, "output_raster.shp")
 infestation_plot_path <- file.path(tif_models_dir, "infestation_level.png")
+
 ```
 
 ```{r}
 # Load NDVI and Field Data
 covariates <- rast(c(
-  ndvi_path, dem_path, slope_path, aspect_path, long_curv_path, plan_curv_path, tpi_path, tri_path)) %>% 
+  ndvi_path, terrain_vars, clim_vars)) %>% 
   clean_names()
 
 field_points <- read.csv(survey_path, stringsAsFactors = FALSE) %>%
@@ -55,7 +59,7 @@ field_points <- read.csv(survey_path, stringsAsFactors = FALSE) %>%
   dplyr::select(northing, westing, cover) %>% 
   mutate(cover = as.numeric(cover)) %>% 
   st_as_sf(coords = c("westing", "northing"), crs = 4326) %>% 
-  st_transform(3005)
+  st_transform(st_crs(covariates))
 ```
 
 ```{r}
@@ -91,9 +95,8 @@ param_set <- ParamSet$new(params = list(
 ))
 
 # Graphs and pipeops for tuning
-po_flt = po("filter", filter = flt("importance"), filter.nfeat = to_tune(5, task_raw$ncol))
-graph = po("learner", lrnr)
-
+po_flt = po("filter", filter = flt("information_gain"), filter.nfeat = to_tune(5, task_raw$ncol))
+graph = po_flt %>>% po("learner", lrnr)
 
 at = auto_tuner(
   tuner = tnr("grid_search", resolution = 5),
@@ -107,53 +110,18 @@ rr <- resample(task_raw, at, rsmp("holdout", ratio = 1), store_models = TRUE)
 best_learner <- rr$learners[[1]]$learner
 ```
 
-The code below has been copy/pasted from the predict_spatial() function, and has been customized to provide an output of the probability of cheatgrass being present rather than its classified output. It currently works well with untuned models, and autotuning the models will be critical for getting this working for the rest of it. Works with both random forest (preferred for spatial data) and SVM's.
+Create the map prediction
 
 ```{r}
-# Define function inputs
-learner = best_learner
-task = as_task_unsupervised(covariates)
-filename = tempfile(fileext = ".tif")
-stack = task$backend$stack
 
-# Create a spatial learner
-learner = switch(learner$task_type, classif = mlr3spatial:::LearnerClassifSpatial$new(learner), 
-                 regr = mlr3spatial:::LearnerRegrSpatial$new(learner))
+if(file.exists(tif_filename)) unlink(tif_filename)
+map_prediction <- predict_spatial(covariates, best_learner, filename = tif_filename)
 
-# Define "block" size (i.e.: how large of files to process at once)
-bs = block_size(stack, 200L)
-
-# Create an output template raster
-target_raster = terra::rast(terra::ext(stack), resolution = terra::res(stack), 
-                            crs = terra::crs(stack))
-terra::writeStart(target_raster, filename = filename, 
-                  overwrite = TRUE, datatype = "FLT8S")
-
-# Use edited function to output probability of presence.
-mlr3misc::pmap(list(
-  bs$cells_seq, bs$cells_to_read, 
-  seq_along(bs$cells_seq)), function(cells_seq, cells_to_read, n) {
-    stack = task$backend$stack
-    pred = learner$predict(task, row_ids = cells_seq:((cells_seq + 
-                                                         cells_to_read - 1)))
-    
-    # Handle NA values in predictions
-    non_na_pos = which(!is.nan(pred$response))
-    v = rep(NaN, cells_to_read)
-    v[non_na_pos] = pred$response[non_na_pos]
-    terra::writeValues(x = target_raster, v = v, 
-                       start = terra::rowFromCell(stack, cells_seq), 
-                       nrows = terra::rowFromCell(stack, cells_to_read))
-  })
-terra::writeStop(target_raster)
-
-# Move your raster from the tempfile to the desired directory
-file.copy(from = filename, to = tif_filename, overwrite = TRUE)
 ```
 
 ```{r}
 # Read the TIFF file into a raster object
-input_raster <- raster(tif_filename)
+input_raster <- raster(map_prediction)
 
 # Open PNG device with adjusted height
 png(filename = infestation_plot_path, width = 1000, height = 1100, units = "px", res = 96)
@@ -191,3 +159,88 @@ legend("topright", legend=labels, fill=colors, title="Infestation Level", cex=0.
 dev.off()
 
 ```
+
+
+Random forest classifier model (re-inserted from previously)
+
+The code below has been copy/pasted from the predict_spatial() function, and has been customized to provide an output of the probability of cheatgrass being present rather than its classified output. It currently works well with untuned models, and autotuning the models will be critical for getting this working for the rest of it. Works with both random forest (preferred for spatial data) and SVM's.
+
+```{r}
+
+field_points_classif <- field_points |> 
+  mutate(presence = as.factor(cover > 0)) |> 
+  dplyr::select(-cover)
+
+# Convert field_points to SpatVector
+field_points_classif_vector <- terra::vect(field_points_classif)
+
+# Extract Raster Data for Points
+raster_extract_classif <- terra::extract(covariates, field_points_classif_vector, ID = FALSE,
+                                 fun = mean, na.rm = TRUE, bind = TRUE) %>%
+  st_as_sf() %>%
+  na.omit()
+
+# Define the model
+task_raw_classif <- as_task_classif_st(raster_extract_classif, target = "presence", positive = "TRUE")
+lrnr_classif <- lrn("classif.ranger", predict_type = "prob", importance = 'impurity',
+            mtry.ratio = to_tune(0.1, 1))
+
+# Graphs and pipeops for tuning
+po_flt_classif = po("filter", filter = flt("auc"), 
+            filter.nfeat = to_tune(5, task_raw_classif$ncol))
+graph_classif = po_flt_classif %>>% po("learner", lrnr_classif)
+
+at_classif = auto_tuner(
+  tuner = tnr("grid_search", resolution = 5),
+  learner = graph_classif,
+  resampling = rsmp("repeated_spcv_coords", folds = 10, repeats = 3),
+  measure = msr("classif.ce"), 
+  terminator = trm("none"), store_tuning_instance = TRUE
+)
+rr_classif <- resample(task_raw_classif, at_classif, rsmp("holdout", ratio = 1), store_models = TRUE)
+best_learner_classif <- rr_classif$learners[[1]]$learner
+
+# Define function inputs
+learner = best_learner_classif
+task = as_task_unsupervised(covariates)
+filename = tempfile(fileext = ".tif")
+stack = task$backend$stack
+
+# Create a spatial learner
+learner = switch(learner$task_type, classif = mlr3spatial:::LearnerClassifSpatial$new(learner), 
+                 regr = mlr3spatial:::LearnerRegrSpatial$new(learner))
+
+# Define "block" size (i.e.: how large of files to process at once)
+bs = block_size(stack, 200L)
+
+# Create an output template raster
+target_raster = terra::rast(terra::ext(stack), resolution = terra::res(stack), 
+                            crs = terra::crs(stack))
+terra::writeStart(target_raster, filename = filename, 
+                  overwrite = TRUE, datatype = "FLT8S")
+
+# Use edited function to output probability of presence.
+mlr3misc::pmap(list(
+  bs$cells_seq, bs$cells_to_read, 
+  seq_along(bs$cells_seq)), function(cells_seq, cells_to_read, n) {
+    stack = task$backend$stack
+    pred = learner$predict(task, row_ids = cells_seq:((cells_seq + 
+                                                         cells_to_read - 1)))
+    
+    # The pred$prob object does not contain rows with NA values, those need
+    # to be added in and that can be accomplished by inserting those values
+    # into an empty vector at the non-NA positions gleaned from the responses.
+    non_na_pos = which(!is.nan(pred$response))
+    v = rep(NaN, cells_to_read)
+    v[non_na_pos] = pred$prob[, "TRUE"]
+    terra::writeValues(x = target_raster, v = v, 
+                       start = terra::rowFromCell(stack, cells_seq), 
+                       nrows = terra::rowFromCell(stack, cells_to_read))
+  })
+terra::writeStop(target_raster)
+
+# Move your raster from the tempfile to the desired directory
+file.copy(from = filename, to = file.path(tif_models_dir, "output_prob.tif"), overwrite = TRUE)
+
+```
+
