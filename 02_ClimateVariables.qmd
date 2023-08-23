@@ -105,6 +105,7 @@ The ClimateNAr package has a new function, "varScan", which will determine the b
 
 ```{r}
 
+# Need to extract the data at each of the climate variables. Load in rasters and points
 clim_lyrs <- rast(list.files(tif_dir, pattern = ".tif$", full.names = TRUE))
 pts <- read.csv("Survey.csv", stringsAsFactors = FALSE) %>%
   clean_names() %>%
@@ -117,21 +118,30 @@ pts <- read.csv("Survey.csv", stringsAsFactors = FALSE) %>%
   st_as_sf(coords = c("westing", "northing"), crs = 4326) %>% 
   st_transform(crs(clim_lyrs)) |> 
   vect()
+
+# Extract the raster data at each of the points
 clim_extr <- terra::extract(clim_lyrs, pts, ID = FALSE, fun = mean, na.rm = TRUE, 
                      bind = TRUE) |> 
   as.data.frame() |> 
   na.omit()
 
-x <- select(clim_extr, -cover)
-y <- clim_extr$cover
+# Determine the number of unique values in each of the variables, varScan only runs with 3 or more unique values
+clim_extr_sum <- clim_extr |> 
+  summarise(across(all_of(names(clim_extr)), ~length(unique(.x)))) |> 
+  unlist()
+
+clim_extr_sum <- names(clim_extr_sum[clim_extr_sum > 2])
+
+x <- select(clim_extr, all_of(clim_extr_sum), -cover)
+y <- clim_extr$cover > 0
 
 # Do the varScan function. varComb = 3 should provide enough detail. Using varComb = 4 takes too long as there are too many combinations.
-bestMod <- varScan(x, y, varComb = 3, smVar = 0, IR = FALSE)
+bestMod <- varScan(x, y, varComb = 2, smVar = 0, IR = FALSE)
 
 # Identify the top variables to use
 clim_list <- bestMod$list |> 
-  filter(`P-value` < 0.05) |> 
-  select(var1, var2, var3)
+  slice_head(prop = 0.001) |> 
+  select(var1, var2)
 
 clim_vars <- unique(c(clim_list$var1, clim_list$var2, clim_list$var3))
 
