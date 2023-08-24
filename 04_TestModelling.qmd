@@ -120,43 +120,64 @@ map_prediction <- predict_spatial(covariates, best_learner, filename = tif_filen
 ```
 
 ```{r}
-# Read the TIFF file into a raster object
-input_raster <- raster(map_prediction)
+# # Read the TIFF file into a raster object
+# input_raster <- raster(map_prediction)
+# 
+# # Open PNG device with adjusted height
+# png(filename = infestation_plot_path, width = 1000, height = 1100, units = "px", res = 96)
+# 
+# # Define breakpoints and labels based on new criteria
+# breaks <- c(0, 1, 6, 26, 51, 100)
+# labels <- c("Free (0%)",
+#             "Trace (1-5%)",
+#             "Mild Infestation (6-25%)",
+#             "Moderate Infestation (26-50%)",
+#             "Cheatgrass Dominated (51-100%)")
+# 
+# # Create the reclassification matrix dynamically
+# reclass_mat <- c(breaks[1], breaks[2], 1,
+#                  breaks[2], breaks[3], 2,
+#                  breaks[3], breaks[4], 3,
+#                  breaks[4], breaks[5], 4,
+#                  breaks[5], breaks[6], 5)
+# 
+# reclassified_raster <- reclassify(input_raster, rcl = matrix(reclass_mat, ncol=3, byrow=TRUE))
+# 
+# # Define visually appealing colors for each category
+# colors <- c("#00BFFF", "#ADFF2F", "#FFD700", "#FF8C00", "#FF0000")
+# 
+# # Adjusting margins for more space on the right side
+# par(mar=c(5,4,4,5)+0.1)  # Increased the right margin to fit the long labels
+# 
+# # Generate the plot
+# plot(reclassified_raster, col=colors, legend=FALSE)
+# 
+# # Manually add the legend using the breaks and labels
+# legend("topright", legend=labels, fill=colors, title="Infestation Level", cex=0.8)
+# 
+# # Close PNG device
+# dev.off()
 
-# Open PNG device with adjusted height
-png(filename = infestation_plot_path, width = 1000, height = 1100, units = "px", res = 96)
-
-# Define breakpoints and labels based on new criteria
-breaks <- c(0, 1, 6, 26, 51, 100)
-labels <- c("Free (0%)",
+## from-to-becomes
+# classify the values into multiple groups 
+m <- data.frame(
+  from = c(0, 1, 5, 15, 30, 45),
+  to = c(1, 5, 15, 30, 45, 100),
+  id = c(0, 1, 2, 3, 4, 5),
+  cover = c("Free (0%)",
             "Trace (1-5%)",
-            "Mild Infestation (6-25%)",
-            "Moderate Infestation (26-50%)",
-            "Cheatgrass Dominated (51-100%)")
+            "Light Infestation (5-15%)",
+            "Mild Infestation (15-30%)",
+            "Moderate Infestation (30-45%)",
+            "Cheatgrass Dominated (45-100%)"),
+  colors = c("white", "#00BFFF", "#ADFF2F", "#FFD700", "#FF8C00", "#FF0000"))
+rclmat <- as.matrix(m[, 1:3])
+rcl <- classify(map_prediction, rclmat, include.lowest = TRUE)
+coltab(rcl) <- m$colors
+levels(rcl) <- m[, 3:4]
 
-# Create the reclassification matrix dynamically
-reclass_mat <- c(breaks[1], breaks[2], 1,
-                 breaks[2], breaks[3], 2,
-                 breaks[3], breaks[4], 3,
-                 breaks[4], breaks[5], 4,
-                 breaks[5], breaks[6], 5)
-
-reclassified_raster <- reclassify(input_raster, rcl = matrix(reclass_mat, ncol=3, byrow=TRUE))
-
-# Define visually appealing colors for each category
-colors <- c("#00BFFF", "#ADFF2F", "#FFD700", "#FF8C00", "#FF0000")
-
-# Adjusting margins for more space on the right side
-par(mar=c(5,4,4,5)+0.1)  # Increased the right margin to fit the long labels
-
-# Generate the plot
-plot(reclassified_raster, col=colors, legend=FALSE)
-
-# Manually add the legend using the breaks and labels
-legend("topright", legend=labels, fill=colors, title="Infestation Level", cex=0.8)
-
-# Close PNG device
-dev.off()
+rcl <- writeRaster(rcl, file.path(tif_models_dir, "infestation_level.tif"), 
+                   overwrite = TRUE)
 
 ```
 
@@ -240,7 +261,33 @@ mlr3misc::pmap(list(
 terra::writeStop(target_raster)
 
 # Move your raster from the tempfile to the desired directory
-file.copy(from = filename, to = file.path(tif_models_dir, "output_prob.tif"), overwrite = TRUE)
+target_raster <- writeRaster(target_raster, file.path(tif_models_dir, "output_prob.tif"),
+                             overwrite = TRUE)
+
+# Create classification bins for the probabilities. Not quite as useful as 
+# above, but the format here makes it adjustable if needed.
+
+## from-to-becomes
+# classify the values into multiple groups 
+m_classif <- data.frame(
+  from = c(0, 0.25, 0.5, 0.6, 0.7, 0.8, 0.9),
+  to = c(0.25, 0.5, 0.6, 0.7, 0.8, 0.9, 1),
+  id = c(0, 1, 2, 3, 4, 5, 6),
+  probability = c("<25%",
+           "25-50%",
+           "50-60%",
+           "60-70%",
+           "70-80%",
+           "80-90%",
+           "90-100%"),
+  colors = c("white", "#00BFFF", "#ADFF2F", "#FFD700", "#FF8C00", "red1", "darkred"))
+rclmat_classif <- as.matrix(m_classif[, 1:3])
+rcl_classif <- classify(target_raster, rclmat_classif, include.lowest = TRUE)
+coltab(rcl_classif) <- m_classif$colors
+levels(rcl_classif) <- m_classif[, 3:4]
+
+rcl_classif <- writeRaster(rcl_classif, file.path(tif_models_dir, "prob_class.tif"), 
+                   overwrite = TRUE)
 
 ```
 
