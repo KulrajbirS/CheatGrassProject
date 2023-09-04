@@ -1,26 +1,25 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
 
-```{r}
+```{r include=FALSE}
 # Required Libraries
-library(mlr3)
-library(mlr3fselect)
-library(mlr3tuning)
-library(mlr3learners)
+library(mlr3verse)
 library(mlr3spatial)
 library(mlr3spatiotempcv)
-library(mlr3pipelines)
-library(mlr3filters)
 library(tidyverse)
 library(sf)
 library(terra, exclude = "resample")
 library(janitor)
-library(ranger)
-library(e1071)
-library(raster, exclude = "resample")
+library(future)
 ```
 
-```{r}
+```{r include=FALSE}
 # Set workspace
 workspace_dir <- './'
+source("mlr3_predict_spatial_prob.R")
 
 # Set input/output file paths
 raw_dir <- file.path(workspace_dir, "01_raw")
@@ -37,7 +36,7 @@ clim_vars <- list.files(clim_dir, pattern = ".tif$", full.names = TRUE)
 # plan_curv_path <- file.path(output_dir, "plan_curvature.tif")
 # tpi_path <- file.path(output_dir, "tpi.tif")
 # tri_path <- file.path(output_dir, "tri.tif")
-survey_path <- file.path(workspace_dir, "Survey.csv")
+survey_path <- file.path(workspace_dir, "Survey_new.csv")
 tif_filename = file.path(tif_models_dir, "output_raster.tif")
 shp_filename = file.path(tif_models_dir, "output_raster.shp")
 infestation_plot_path <- file.path(tif_models_dir, "infestation_level.png")
@@ -54,7 +53,9 @@ field_points <- read.csv(survey_path, stringsAsFactors = FALSE) %>%
   clean_names() %>%
   rename(cover = x_cover) %>%
   mutate(cover = gsub("<|>", "", cover)) %>% 
+  mutate(cover = gsub("\\s*\\([^\\)]+\\)","", cover)) %>%
   separate_wider_delim(cover, "-", names_sep = "-", too_few = "align_end") %>% 
+  # mutate(`cover-2` = ifelse(is.na(`cover-1`), `cover-2`, `cover-1`)) %>%
   rename(cover = last_col()) %>% 
   dplyr::select(northing, westing, cover) %>% 
   mutate(cover = as.numeric(cover)) %>% 
@@ -80,34 +81,66 @@ set.seed(123)
 task_raw <- as_task_regr_st(raster_extract, target = "cover")
 ```
 
-Random Forest Regressor
+Random Forest Regressor using recursive feature elimination, hyperparameter tuning, and spatial cross validation all together to determine the best feature and parameter set. Using from an example here: https://mlr3book.mlr-org.com/chapters/chapter8/non-sequential_pipelines_and_tuning.html#sec-pipelines-featsel
 
-```{r}
-# Define the model
-lrnr <- lrn("regr.ranger", importance = 'impurity',
-            mtry.ratio = to_tune(0.1, 1))
+```{r include=FALSE}
 
-# Define the parameter set
-param_set <- ParamSet$new(params = list(
-  ParamInt$new("mtry", lower = 1, upper = floor(sqrt(ncol(raster_extract)))),
-  ParamInt$new("min.node.size", lower = 1, upper = 100),
-  ParamInt$new("num.trees", lower = 100, upper = 1000)
-))
+# # Define the model
+# tune between 5 and total number of features
+# Create the learner and feed it into a pipe for feature filtering. Note: this 
+# is not the same as recursive feature elimination, but will only use the top
+# number of features based on importance scores, so it is a close approximation
+# of recursive feature elimination.
+lrnr <- lrn("regr.ranger", importance = "impurity")
+po_filter = po("filter", filter = flt("importance", learner = lrnr))
+graph = as_learner(po_filter %>>% po("learner", lrnr))
 
-# Graphs and pipeops for tuning
-po_flt = po("filter", filter = flt("information_gain"), filter.nfeat = to_tune(5, task_raw$ncol))
-graph = po_flt %>>% po("learner", lrnr)
-
-at = auto_tuner(
-  tuner = tnr("grid_search", resolution = 5),
-  learner = graph,
-  resampling = rsmp("repeated_spcv_coords", folds = 10, repeats = 3),
-  measure = msr("regr.mse"), 
-  terminator = trm("none"), store_tuning_instance = TRUE
+# Explicitly define the machine learning parameters
+params = ps(
+  importance.filter.nfeat = p_fct(nlyr(covariates):5),
+  regr.ranger.num.trees = p_fct(c(1, 250, 500, 1000, 1500, 2000)),
+  regr.ranger.mtry.ratio = p_fct(c(0, 0.25, 0.5, 0.75, 1))
 )
+resamp <- rsmp("repeated_spcv_coords", folds = 10, repeats = 3)
 
-rr <- resample(task_raw, at, rsmp("holdout", ratio = 1), store_models = TRUE)
-best_learner <- rr$learners[[1]]$learner
+# Begin modelling in parallel
+plan("multisession", workers = min(c(availableCores(), resamp$iters)))
+
+instance = suppressWarnings(mlr3tuning::tune(
+  tnr("grid_search", resolution = 1), 
+  task = task_raw,
+  learner = graph,
+  resampling = resamp, 
+  terminator = trm("none"), 
+  measures = msrs(c("oob_error", "regr.mse")),
+  search_space = params,
+  store_models = TRUE))
+
+plan("sequential")
+
+# Extract the model with the best scores. Best score here is defined as the 
+# lowest score from a normalized dataset from either OOB errors or MSE.
+arch <- as.data.table(instance$archive)
+best_model_scores <- matrix(c(
+  which.min(scale(arch$regr.mse)), min(scale(arch$regr.mse)), 
+  which.min(scale(arch$oob_error)), min(scale(arch$oob_error))), ncol = 2)
+best_model_rowid <- best_model_scores[1, which.min(best_model_scores[2, ])]
+model_extract <- instance$archive$learners(best_model_rowid)
+
+# Apply best model parameters and create a trained model
+model_feats <- model_extract[[1]]$model$importance$features
+model_params <- model_extract[[1]]$param_set$values
+best_task <- task_raw$clone()
+best_task$select(model_feats)
+best_learner <- lrnr$clone()
+best_learner$param_set$values = list(
+  num.trees = model_params$regr.ranger.num.trees,
+  mtry.ratio = model_params$regr.ranger.mtry.ratio,
+  importance = model_params$regr.ranger.importance,
+  num.threads = availableCores()
+)
+best_learner$train(best_task)
+
 ```
 
 Create the map prediction
@@ -116,47 +149,6 @@ Create the map prediction
 
 if(file.exists(tif_filename)) unlink(tif_filename)
 map_prediction <- predict_spatial(covariates, best_learner, filename = tif_filename)
-
-```
-
-```{r}
-# # Read the TIFF file into a raster object
-# input_raster <- raster(map_prediction)
-# 
-# # Open PNG device with adjusted height
-# png(filename = infestation_plot_path, width = 1000, height = 1100, units = "px", res = 96)
-# 
-# # Define breakpoints and labels based on new criteria
-# breaks <- c(0, 1, 6, 26, 51, 100)
-# labels <- c("Free (0%)",
-#             "Trace (1-5%)",
-#             "Mild Infestation (6-25%)",
-#             "Moderate Infestation (26-50%)",
-#             "Cheatgrass Dominated (51-100%)")
-# 
-# # Create the reclassification matrix dynamically
-# reclass_mat <- c(breaks[1], breaks[2], 1,
-#                  breaks[2], breaks[3], 2,
-#                  breaks[3], breaks[4], 3,
-#                  breaks[4], breaks[5], 4,
-#                  breaks[5], breaks[6], 5)
-# 
-# reclassified_raster <- reclassify(input_raster, rcl = matrix(reclass_mat, ncol=3, byrow=TRUE))
-# 
-# # Define visually appealing colors for each category
-# colors <- c("#00BFFF", "#ADFF2F", "#FFD700", "#FF8C00", "#FF0000")
-# 
-# # Adjusting margins for more space on the right side
-# par(mar=c(5,4,4,5)+0.1)  # Increased the right margin to fit the long labels
-# 
-# # Generate the plot
-# plot(reclassified_raster, col=colors, legend=FALSE)
-# 
-# # Manually add the legend using the breaks and labels
-# legend("topright", legend=labels, fill=colors, title="Infestation Level", cex=0.8)
-# 
-# # Close PNG device
-# dev.off()
 
 ## from-to-becomes
 # classify the values into multiple groups 
@@ -181,12 +173,11 @@ rcl <- writeRaster(rcl, file.path(tif_models_dir, "infestation_level.tif"),
 
 ```
 
-
 Random forest classifier model (re-inserted from previously)
 
 The code below has been copy/pasted from the predict_spatial() function, and has been customized to provide an output of the probability of cheatgrass being present rather than its classified output. It currently works well with untuned models, and autotuning the models will be critical for getting this working for the rest of it. Works with both random forest (preferred for spatial data) and SVM's.
 
-```{r}
+```{r results="hide"}
 
 field_points_classif <- field_points |> 
   mutate(presence = as.factor(cover > 0)) |> 
@@ -201,68 +192,69 @@ raster_extract_classif <- terra::extract(covariates, field_points_classif_vector
   st_as_sf() %>%
   na.omit()
 
-# Define the model
+# Define the model: task = data, learner = model used
 task_raw_classif <- as_task_classif_st(raster_extract_classif, target = "presence", positive = "TRUE")
-lrnr_classif <- lrn("classif.ranger", predict_type = "prob", importance = 'impurity',
-            mtry.ratio = to_tune(0.1, 1))
+lrnr_classif <- lrn("classif.ranger", predict_type = "prob", importance = "impurity")
 
-# Graphs and pipeops for tuning
-po_flt_classif = po("filter", filter = flt("auc"), 
-            filter.nfeat = to_tune(5, task_raw_classif$ncol))
-graph_classif = po_flt_classif %>>% po("learner", lrnr_classif)
+# Create a feature filtering pipeop learner, allowing it to be used in a tuned model
+po_filter_classif = po("filter", filter = flt("importance", learner = lrnr_classif))
+graph_classif = as_learner(po_filter_classif %>>% po("learner", lrnr_classif))
 
-at_classif = auto_tuner(
-  tuner = tnr("grid_search", resolution = 5),
-  learner = graph_classif,
-  resampling = rsmp("repeated_spcv_coords", folds = 10, repeats = 3),
-  measure = msr("classif.ce"), 
-  terminator = trm("none"), store_tuning_instance = TRUE
+# Explicitly define the machine learning parameters
+params_classif = ps(
+  importance.filter.nfeat = p_fct(nlyr(covariates):5),
+  classif.ranger.num.trees = p_fct(c(1, 250, 500, 1000, 1500, 2000)),
+  classif.ranger.mtry.ratio = p_fct(c(0, 0.25, 0.5, 0.75, 1))
 )
-rr_classif <- resample(task_raw_classif, at_classif, rsmp("holdout", ratio = 1), store_models = TRUE)
-best_learner_classif <- rr_classif$learners[[1]]$learner
+resamp <- rsmp("repeated_spcv_coords", folds = 10, repeats = 3)
 
-# Define function inputs
-learner = best_learner_classif
-task = as_task_unsupervised(covariates)
-filename = tempfile(fileext = ".tif")
-stack = task$backend$stack
+# Begin modelling in parallel
+plan("multisession", workers = min(c(availableCores(), resamp$iters)))
 
-# Create a spatial learner
-learner = switch(learner$task_type, classif = mlr3spatial:::LearnerClassifSpatial$new(learner), 
-                 regr = mlr3spatial:::LearnerRegrSpatial$new(learner))
+# Tuning will happen across the number of features sorted by their feature 
+# importance, a defined set of numbers of trees, and a defined set of mtry 
+# ratios. Each individual model will be repeated in a 10-fold spatial cross=
+# validation repeated 3 times. Each model is stored in memory, and with tens
+# of thousands of stored models this will explode your RAM usage.
+instance_classif = suppressWarnings(mlr3tuning::tune(
+  tnr("grid_search", resolution = 1), 
+  task = task_raw_classif,
+  learner = graph_classif,
+  resampling = resamp, 
+  terminator = trm("none"), 
+  measures = msrs(c("oob_error", "classif.ce")),
+  search_space = params_classif,
+  store_models = TRUE))
 
-# Define "block" size (i.e.: how large of files to process at once)
-bs = block_size(stack, 200L)
+plan("sequential")
 
-# Create an output template raster
-target_raster = terra::rast(terra::ext(stack), resolution = terra::res(stack), 
-                            crs = terra::crs(stack))
-terra::writeStart(target_raster, filename = filename, 
-                  overwrite = TRUE, datatype = "FLT8S")
+# Extract the model with the best scores. Best score here is defined as the 
+# lowest score from a normalized dataset from either OOB errors or MSE.
+arch_classif <- as.data.table(instance_classif$archive)
+best_classif_model_scores <- matrix(c(
+  which.min(scale(arch_classif$classif.ce)), min(scale(arch_classif$classif.ce)), 
+  which.min(scale(arch_classif$oob_error)), min(scale(arch_classif$oob_error))), ncol = 2)
+best_classif_model_rowid <- best_classif_model_scores[1, which.min(best_classif_model_scores[2, ])]
+model_extract_classif <- instance_classif$archive$learners(best_classif_model_rowid)
 
-# Use edited function to output probability of presence.
-mlr3misc::pmap(list(
-  bs$cells_seq, bs$cells_to_read, 
-  seq_along(bs$cells_seq)), function(cells_seq, cells_to_read, n) {
-    stack = task$backend$stack
-    pred = learner$predict(task, row_ids = cells_seq:((cells_seq + 
-                                                         cells_to_read - 1)))
-    
-    # The pred$prob object does not contain rows with NA values, those need
-    # to be added in and that can be accomplished by inserting those values
-    # into an empty vector at the non-NA positions gleaned from the responses.
-    non_na_pos = which(!is.nan(pred$response))
-    v = rep(NaN, cells_to_read)
-    v[non_na_pos] = pred$prob[, "TRUE"]
-    terra::writeValues(x = target_raster, v = v, 
-                       start = terra::rowFromCell(stack, cells_seq), 
-                       nrows = terra::rowFromCell(stack, cells_to_read))
-  })
-terra::writeStop(target_raster)
+# Apply best model parameters and create a trained model
+model_feats_classif <- model_extract_classif[[1]]$model$importance$features
+model_params_classif <- model_extract_classif[[1]]$param_set$values
+best_task_classif <- task_raw_classif$clone()
+best_task_classif$select(model_feats_classif)
+best_learner_classif <- lrnr_classif$clone()
+best_learner_classif$param_set$values = list(
+  num.trees = model_params_classif$classif.ranger.num.trees,
+  mtry.ratio = model_params_classif$classif.ranger.mtry.ratio,
+  importance = model_params_classif$classif.ranger.importance,
+  num.threads = availableCores()
+)
+best_learner_classif$train(best_task_classif)
 
-# Move your raster from the tempfile to the desired directory
-target_raster <- writeRaster(target_raster, file.path(tif_models_dir, "output_prob.tif"),
-                             overwrite = TRUE)
+tif_filename_classif <- file.path(tif_models_dir, "output_prob.tif")
+if(file.exists(tif_filename_classif)) unlink(tif_filename_classif)
+map_prediction_classif <- predict_spatial_prob(covariates, best_learner_classif,
+                                               filename = tif_filename_classif)
 
 # Create classification bins for the probabilities. Not quite as useful as 
 # above, but the format here makes it adjustable if needed.
@@ -282,7 +274,7 @@ m_classif <- data.frame(
            "90-100%"),
   colors = c("white", "#00BFFF", "#ADFF2F", "#FFD700", "#FF8C00", "red1", "darkred"))
 rclmat_classif <- as.matrix(m_classif[, 1:3])
-rcl_classif <- classify(target_raster, rclmat_classif, include.lowest = TRUE)
+rcl_classif <- classify(map_prediction_classif$`TRUE`, rclmat_classif, include.lowest = TRUE)
 coltab(rcl_classif) <- m_classif$colors
 levels(rcl_classif) <- m_classif[, 3:4]
 
@@ -290,4 +282,3 @@ rcl_classif <- writeRaster(rcl_classif, file.path(tif_models_dir, "prob_class.ti
                    overwrite = TRUE)
 
 ```
-
