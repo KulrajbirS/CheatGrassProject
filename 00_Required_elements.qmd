@@ -108,6 +108,9 @@ rstudioapi::restartSession()
 # Install the required GEE python packages and restart the RStudio session
 ee_install(py_env = file.path(py_path, "envs", py_env), confirm = FALSE)
 rstudioapi::restartSession()
+
+# Check that Earth Engine was installed correctly, and initialize Google Drive
+ee_check()
 ee_Initialize(drive = TRUE)
 
 ```
