@@ -1,0 +1,678 @@
+---
+title: "04_SatelliteVariables"
+author: "Matthew Coghill"
+format: html
+editor: visual
+---
+
+This document is going to be used to pull in relevant satellite layers for analysis. This is heavily adapted from the Hackathon in Prince George (https://github.com/bcgov-datasci-labs/BCForestNonForestPEM/blob/master/01_Load_Sentinel.R) and from conversations I had with Tom Hengl regarding satellite imagery. I have provided functions for downloading cloud free medians of satellite bands as they span across a given time frame (ex: spring). This requires an interface to Google Earth Engine.
+
+The first thing that will be done is load in the required packages. Included in this chunk is the Earth Engine initialization step. This is largely untested, so hopefully it works. If any issues arise, try restarting your R session and retrying this chunk before further troubleshooting. The Google Earth Engine requires that you have an active GMail account since files are intermediately saved from Earth Engine to Google Drive. It may send you down a road to set it up, and again it may require a restart of your R session in order to proceed properly (not super sure on that...). If any issues arise, contact me and I'll try to sort it out with you.
+
+```{r Load Packages}
+
+invisible(suppressPackageStartupMessages(
+  lapply(c("RStoolbox", "terra", "sf", "googledrive", "tidyverse",
+           "rgee", "rstudioapi"), library, character.only = TRUE)))
+
+# The initial steps should be taken care of already from the 00_required_elements
+# file, so all that should be needed is to authenticate and initialize your EE
+# session:
+ee_Initialize(drive = TRUE)
+
+```
+
+Next, load some local directories and file paths including relevant paths to shapes of the study area and a candidate raster layer for each resolution (used the DEM here but it could have been any raster layer of interest).
+
+```{r Set Directories, message=FALSE, warning=FALSE}
+
+# Define study area folder
+AOI <- "Sechelt"
+AOI_dir <- file.path(".", paste0(AOI, "_AOI"))
+
+# Define covariate input folders
+cov_dir <- file.path(AOI_dir, "1_map_inputs", "covariates")
+all_dem <- list.files(cov_dir, pattern = "dem.tif$", full.names = TRUE, recursive = TRUE)
+cov_res <- dirname(unlist(lapply(all_dem, function(x) {
+  r <- rast(x)
+  if(xres(r) >= 2) sources(r)[, "source"] else NULL })))
+
+dem_list <- sapply(cov_res, list.files, pattern = "dem.tif", full.names = TRUE,
+                   USE.NAMES = FALSE)
+
+# Define AOI shape to use - defined by merged AOI area for largest extent
+shp_dir <- file.path(AOI_dir, "0_raw_inputs", "base_layers")
+shp_res <- dir(shp_dir, pattern = paste0(basename(cov_res), collapse = "$|"), 
+               recursive = FALSE, full.names = TRUE)
+shp_list <- sapply(shp_res, list.files, pattern = "aoi.gpkg", full.names = TRUE,
+                   USE.NAMES = FALSE)
+shp <- bind_rows(lapply(shp_list, st_read, quiet = TRUE)) %>% 
+  summarise(do_union = TRUE) %>% 
+  st_bbox() %>% 
+  st_as_sfc()
+
+# Define path for file processing (doesn't have to exist)
+raw_dir <- file.path(AOI_dir, "0_raw_inputs", "satellite_layers")
+
+```
+
+Next, set up a function that will create the Earth Engine tasks to process cloud free Sentinel-2 bands. This took a while to figure out! The function requires 3 inputs:
+
+1)  An AOI polygon or multipolygon. This is provided as an sf object, converted to a bounding box, and then the bounding box shape is used as the Earth Engine polygon area of interest
+2)  A data.frame of date ranges used to limit the Earth Engine processing. This data.frame has 3 columns: an ID column, a start date column, and an end date column. I'm still thinking of ways to make that better, but for now that's how it is
+3)  A dsn (data source name) for where to place the downloaded/processed data.
+
+The Earth Engine function works in the following manner: 1) Filters the sentinel-2 images taken between the specified start and end dates 2) Removes clouds from each of the images for each of the bands (bands are identified as beginning with the letter "B") 3) Takes the median value at each pixel for the band "stack"
+
+Additionally, the true color bands are downloaded using their raw values (0-255). After processing, Google Earth Engine requires that the bands are saved to a Google Drive folder (or Google Cloud Services (GCS) repository, but that costs money). The bands for the specified date ranges are downloaded locally and then processed to produce the satellite indices. Satellite indices are saved within the specified DSN. Only indices that have enough data are kept (usually this means tossing out the EVI2 file).
+
+This function keeps all of the bands at their native resolutions throughout and results with each satellite index at a raw resolution of 10m^2^.
+
+```{r Satellite Download}
+
+# Function requires that rgee is working
+get_satellite_indices <- function(aoi, date_ranges, dsn = NULL) {
+  
+  # Evaluate aoi input
+  if(!inherits(aoi, c("sf", "sfc")))
+    stop("'aoi' must be of class 'sf' or 'sfc'")
+  
+  if(!st_geometry_type(aoi, by_geometry = FALSE) %in% c("POLYGON", "MULTIPOLYGON"))
+    stop("'aoi' must be an sf or sfc POLYGON or MULTIPOLYGON")
+  
+  # Evaluate date_ranges input
+  if(ncol(date_ranges) != 3)
+    stop(
+      "'date_ranges' should be a data.frame object with 3 character class columns.
+    \rColumn 1 should be a character value indicating the subfolder for the specified date range.
+    \rColumn 2 should be a character value indicating the starting point of the date range.
+    \rColumn 3 should be a character value indicating the ending point of the date range.")
+  
+  if(!all(apply(date_ranges, 2, is.character)))
+    stop(
+      "'date_ranges' should be a data.frame object with 3 character class columns.
+    \rColumn 1 should be a character value indicating the subfolder for the specified date range.
+    \rColumn 2 should be a character value indicating the starting point of the date range.
+    \rColumn 3 should be a character value indicating the ending point of the date range.")
+  
+  # Evaluate dsn input
+  if(is.null(dsn)) dsn <- getwd()
+  if(!is.character(dsn))
+    stop("'dsn' requires a valid file path as a character input")
+  
+  # Create directories for saving and reprojecting
+  dl_dir <- file.path(dsn, "1_download")
+  ind_dir <- file.path(dsn, "2_indices")
+  
+  dir.create(dl_dir, showWarnings = FALSE, recursive = TRUE)
+  dir.create(ind_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  # Set geometry for use in GEE (should make checks for polygon/multipolygon type)
+  # Should force conversion to sf bounding box!
+  # Projection doesn't matter, it is set properly in the download function
+  ee_geom <- st_geometry(aoi) %>% 
+    st_bbox() %>% 
+    st_as_sfc() %>% 
+    sf_as_ee()
+  
+  # Determine some important metadata RE sentinel 2 satellites
+  sen <- ee$ImageCollection("COPERNICUS/S2_SR")
+  bands <- grep("^B.*|^TCI.*", sen$first()$bandNames()$getInfo(), value = TRUE)
+  scales <- sapply(bands, function(x) 
+    sen$first()$select(x)$projection()$nominalScale()$getInfo())
+  
+  # Create a cloud masking function which will run in GEE
+  cloud_mask <- function(image) {
+    qa <- image$select("QA60")
+    cloudBitMask <- bitwShiftL(1, 10)
+    cirrusBitMask <- bitwShiftL(1, 11)
+    mask <- qa$bitwiseAnd(cloudBitMask)$eq(0)$
+      And(qa$bitwiseAnd(cirrusBitMask)$eq(0))
+    image <- image$select("B.*")$updateMask(mask)$divide(10000L)
+  }
+  
+  # Function selects the TCI images as well (easier viewing in GIS programs)
+  add_tci <- function(image) {
+    image$select("TCI.*")
+  }
+  
+  # Perform filtering operations in GEE
+  gee_run <- lapply(1:nrow(date_ranges), function(i) {
+    dl_subdir <- file.path(dl_dir, date_ranges[i, 1])
+    ind_subdir <- file.path(ind_dir, date_ranges[i, 1])
+    
+    dir.create(dl_subdir, showWarnings = FALSE)
+    dir.create(ind_subdir, showWarnings = FALSE)
+    
+    dataset <- sen$
+      filterDate(date_ranges[i, 2], date_ranges[i, 3])$
+      filter(ee$Filter$lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+    
+    rgb <- dataset$map(add_tci)$median()
+    composite <- dataset$map(cloud_mask)$median()$addBands(rgb)
+    
+    message("Downloading Sentinel-2 Level-2A bands via GEE for dates between ", 
+            date_ranges[i, 2], " and ", date_ranges[i, 3])
+    # Composite image is made up of each sentinel 2 band. Need to extract the
+    # bands and run the function to save the files to the download directory
+    gee_dl <- lapply(bands, function(x) {
+      ee_as_raster(
+        composite$select(x), 
+        region = ee_geom, 
+        dsn = file.path(dl_subdir, paste0(x, ".tif")), 
+        scale = scales[x], 
+        lazy = TRUE, quiet = TRUE)})
+    
+    rast_bands <- ee_utils_future_value(gee_dl) %>% setNames(lapply(., names))
+    message("Downloading finished! Producing satellite indices")
+    
+    # At this point, should perform calculations for satellite indices. Extract
+    # the 10 and 20m raster bands only
+    tci <- raster::stack(rast_bands[startsWith(names(rast_bands), "TCI")])
+    bands_10 <- names(scales)[!startsWith(names(scales), "TCI") & scales == 10]
+    bands_20 <- names(scales)[!startsWith(names(scales), "TCI") & scales == 20]
+    bands_60 <- names(scales)[!startsWith(names(scales), "TCI") & scales == 60]
+    res_10 <- raster::stack(rast_bands[bands_10]) %>% setMinMax()
+    res_20 <- raster::stack(rast_bands[bands_20]) %>% setMinMax()
+    
+    # Perform pan sharpening on the 20m bands
+    pan <- panSharpen(res_20, mean(res_10, na.rm = TRUE), method = "pca", norm = FALSE)
+    
+    # Stack the 10m bands and pan sharpened bands that are now 10m
+    satellite_stack <- raster::stack(res_10, pan) %>% 
+      setNames(gsub("_pan$", "", names(.)))
+    
+    # Create satellite indices in a single function
+    satellite_indices <- spectralIndices(
+      img = satellite_stack, 
+      blue = "B2", green = "B3", red = "B4", nir = "B8", 
+      redEdge1 = "B5", redEdge2 = "B6", redEdge3 = "B7", 
+      swir2 = "B11", swir3 = "B12", 
+      coefs = list(swir2ccc = max(0, minValue(satellite_stack$B11)), 
+                   swir2coc = min(1, maxValue(satellite_stack$B11))))
+    
+    # Workaround for proper name setting
+    ind_names <- names(satellite_indices)
+    tci_names <- names(tci)
+    satellite_indices <- rast(satellite_indices) %>% setNames(ind_names)
+    tci <- rast(tci) %>% setNames(tci_names)
+    
+    # Remove layers that have missing data
+    layer_check <- data.frame(freq(satellite_indices, value = NA)) %>% 
+      dplyr::mutate(layer = names(satellite_indices[layer]), 
+                    count = ncell(satellite_indices) - count) %>% 
+      dplyr::filter(count > 0.95 * median(count))
+    
+    indices_flt <- subset(satellite_indices, layer_check$layer)
+    f_names <- file.path(ind_subdir, paste0(names(indices_flt), ".tif"))
+    
+    # Write out files
+    message("Cleaning Google Drive container and writing outputs")
+    ee_clean_container(quiet = TRUE)
+    tci <- writeRaster(tci, file.path(ind_subdir, "true_color.tif"), overwrite = TRUE)
+    out <- writeRaster(indices_flt, f_names, overwrite = TRUE)
+    raster::removeTmpFiles(h = 0)
+    return(out)
+    
+  }) %>% setNames(date_ranges[, 1])
+  
+  return(gee_run)
+}
+
+```
+
+Finally, we just need to run the function. The candidate AOI is buffered by 250m, the above function is run, and then each folder of satellite indices gets reprojected to match the DEM at each resolution. The result is masked to match the extent and shape of the DEM, and then each file is saved separately.
+
+```{r Run functions}
+
+# Create a buffered bounding box of the AOI
+AOI_bbox <- st_buffer(shp, 250)
+
+# Provide a data frame of dates to collect data between. The longer the data
+# frame, the longer it will take to process and download your dataset.
+seasons_df <- data.frame(
+  season = c("winter", "spring", "summer", "fall", "2019"),
+  start = c("2018-12-21", "2019-03-20", "2019-06-21", "2019-09-23", "2019-01-01"),
+  end = c("2019-03-19", "2019-06-20", "2019-09-22", "2019-12-21", "2019-12-31"),
+  stringsAsFactors = FALSE)
+
+# Run get_satellite_indices function to download and process sentinel indices
+sentinel_indices <- get_satellite_indices(
+  aoi = AOI_bbox,
+  date_ranges = seasons_df,
+  dsn = raw_dir)
+
+# The function above outputs a list format. Create a single SpatRaster of all
+# of the satellite indices
+sentinel_dirs <- list.dirs(file.path(raw_dir, "2_indices"), recursive = FALSE)
+sentinel_indices <- rast(lapply(sentinel_dirs, function(x) {
+  rast(grep("true_color.tif", 
+            list.files(x, pattern = ".tif$", full.names = TRUE), 
+            invert = TRUE, value = TRUE)) %>% 
+    setNames(tolower(paste0("sentinel2_", names(.), "_", basename(x))))}))
+
+# Remove progress bars for below reprojection
+def_ops <- terra:::spatOptions()$progress
+terraOptions(progress = 0)
+
+# Using the raw satellite indices, reproject them, mask, and save them out.
+# Note: This takes quite a while for 4m resolution, maybe better to do it by
+# layer? Not sure, not tested.
+sentinel_reproject <- lapply(dem_list, function(x) {
+  out_dir <- dirname(x)
+  cat("\nReprojecting satellite indices to", basename(out_dir))
+  dem <- rast(x)
+  out <- terra::project(sentinel_indices, dem) %>% 
+    mask(dem) %>% 
+    writeRaster(filename = file.path(out_dir, paste0(names(.), ".tif")),
+      overwrite = TRUE)
+  suppressWarnings(tmpFiles(remove = TRUE))
+  return(out)
+}) %>% setNames(basename(dirname(dem_list)))
+
+# Reset progress bars
+terraOptions(progress = def_ops)
+
+```
+
+##Water from NDWI layer According to multiple sources, values of \> 0 for the MNDWI layer indicate the presence of a water body. This process can be easily scripted to detect the location of water across a landscape and can be used to compare to that of the water layer downloaded as shapes from the bcdata package
+
+https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2018RG000598
+
+https://www.researchgate.net/profile/Hanqiu_XU/publication/232724072_Modification_of_Normalized_Difference_Water_Index_NDWI_to_Enhance_Open_Water_Features_in_Remotely_Sensed_Imagery/links/5c9aee13299bf1116949a345/Modification-of-Normalized-Difference-Water-Index-NDWI-to-Enhance-Open-Water-Features-in-Remotely-Sensed-Imagery.pdf
+
+```{r find water from MNDWI}
+
+# Looking at all of the mndwi files produced, the best one to use is going to be
+# the one from the summer time frame
+mndwi <- lapply(dem_list, function(i) {
+  if(file.exists(file.path(dirname(i), "sentinel2_mndwi_summer.tif"))) {
+    mndwi_summer <- rast(file.path(dirname(i), "sentinel2_mndwi_summer.tif"))
+    
+    # Reclassify raster values
+    water <- classify(mndwi_summer, 
+                      matrix(c(-Inf, 0, NA, 0, Inf, 1), ncol = 3, byrow = TRUE))
+    
+    # Raster to sf conversion. Need to convert to sf because there is no 
+    # geopackage support in terra package yet.
+    water_sf <- as.polygons(water, crs = crs(water)) %>% 
+      as("Spatial") %>% 
+      st_as_sfc() %>% 
+      st_set_crs(crs(water))
+    
+    st_write(
+      water_sf, delete_dsn = TRUE, quiet = TRUE, 
+      dsn = file.path(AOI_dir, "0_raw_inputs", "base_layers", 
+                      basename(dirname(i)), "water_mndwi.gpkg"))
+    return(water_sf)
+  } else return(NULL)
+})
+
+```
+
+The code above is new and improved in my opinion. Below is some old notes and code that previously worked, but uses more R packages
+
+The following chunk should only need to be ran once. This is where I anticipate some problems to arise. The reticulate package relies on using the conda distribution of python in order to communicate with the google earth engine. The steps that need to be followed are simple but I could see some pitfalls which I will outline here:
+
+0: There are issues that arise when the reticulate package is loaded and you try setting a new environment. In order to work around this, the package needs to be detached and unloaded, then once the PATH is properly set it can be reloaded: https://stackoverflow.com/a/58743111/13191100
+
+1.  You have to have conda installed. This may already be done on a given system, however if it is not then it will be installed. For some reason, even if it's already installed it sometimes says that it isn't, that's why there is a "try" function which will try to install it but throw an error if it is already installed.
+
+2.  After a successful installation, a new python environment needs to be created (conda_create), and that environment needs to be set to be used after that (use_condaenv).
+
+3.  Next, the appropriate python packages will be downloaded and installed to your set conda environment. There should be no more need to restart your system in this case!
+
+4.  Finally, the earthengine api needs authentication from you, so the appropriate web pages will open and following your permission, you will be given a key to copy and paste into the terminal. Make sure you right click the key into the terminal window. That should be all to get this to work!
+
+The chunk below is provides the first of two major functions in this script. In this case, get_sentinel_ee() is used to download cloud free processed images from Google Earth Engine to your machine. The function needs an AOI input as an sf object, an ouptut EPSG code for transforming if necessary, a template raster which helps to determine the maximum download size, the date ranges provided as a table (id, from, to), the name of the Google Drive folder for downloading the files (a subfolder will be created within this folder for each of the date ranges specified), and a download folder to your PC.
+
+This function requires that you have a google earth engine account created using a valid GMail account: https://code.earthengine.google.com/#
+
+First, you must "initialize" the earth engine environment. This will open your web browser to a couple of pages asking for permission to write to your google drive folders. In the end, you will be given a key to copy and paste into a popup window in this R session, and initializaiton should be complete. Note that in the end the files written to Google Drive should not be very large, likely less than 500 Mb total, so that would be a good amount of available space to have on hand. It would also be possible to script automatic deletion of files after they are downloaded as well.
+
+Next, provide the AOI shape as either an sf or sfc object. Note: It's a good idea to buffer the AOI in order to capture the edge effects in processing.
+
+You need to create a dataframe with three columns: The first is an ID column, which will be used for creating subfolders in your downloads folder later. The second column is a start date column, and the third is an end date column. The example given here separates the dates by season; however, you can use as many or as little as you wish.
+
+Finally the function is ran. You should specify a drive_dir for where outputs will be stored to on Google Drive as well as a download folder for when files are downloaded locally. The function takes sentinel 2 images from a specified date range (ex: winter), performs a cloud masking function to remove clouds from an image stack, and then calculates the median across that date range. The final image is clipped to your AOI, reprojected in BC Albers, and then saved to your Google drive folder. Lastly, the image is downloaded locally to your machine where you specify.
+
+# Generate satellite derivatives
+
+Running the get_sentinel_ee function should output rasters with the desired CRS, so no reprojection of the satellite bands is necessary here.
+
+The function bands_to_indices will take bands located in a given folder (satellite_files), pan sharpen the lower resolution bands, reproject and clip them to a given raster (reference_raster), and outputs a raster stack of indices which can be optionally saved to the main covariates folder. The option remove_index can be used if you don't want a particular index in your results (ex: EVI2 seems to generate large areas of no data).
+
+Finally, these reprojected and masked files are used in the processing of vegetation and soil indices. Here, the RStoolbox package is being used to generate these indices all at once. This is not meant to be a comprehensive list of which indices should be used for the PEM project, however I think it provides a solid base for thinking of which indices to include. Some documentation:
+
+https://bleutner.github.io/RStoolbox/rstbx-docu/spectralIndices.html https://pro.arcgis.com/en/pro-app/help/data/imagery/indices-gallery.htm https://www.usgs.gov/land-resources/nli/landsat/landsat-surface-reflectance-derived-spectral-indices
+
+You might notice that not all of the indices from the ArcGIS and USGS websites are included in this package. As mentioned, the RStoolbox is not meant to represent the "be all and end all" of defining which indices to use. Some may not be appropriate to use here, however the package makes it really easy to generate those indices quite quickly.
+
+```{r}
+
+# NOTE: The way this is written allows for functionizing, perhaps as the name
+# "conda_prep(env)", or something like that, where the "env" argument is a 
+# character string for the environment name. Leaving this not functionized for
+# dubugging purposes.
+
+# python_setup <- function(x) {
+#   if("reticulate" %in% (.packages())) detach("package:reticulate", unload = TRUE)
+#   session_py_dir <- file.path(reticulate::miniconda_path(), "envs", x)
+#   Sys.setenv(RETICULATE_PYTHON_ENV = x)
+#   Sys.setenv(RETICULATE_PYTHON = session_py_dir)
+#   
+#   library(reticulate)
+#   # Install miniconda if it isn't already installed
+#   if(!py_available()) try(install_miniconda())
+#   use_python(miniconda_path())
+#   
+#   # Use the defined conda environment (x), create it if necessary
+#   conda_envs <- conda_list()
+#   if(!x %in% conda_envs$name) {
+#     
+#     # Create a conda environment to be used in this R session
+#     conda_create(envname = x)
+#     use_condaenv(x, required = TRUE)
+#     
+#     # Install conda packages that will be used here
+#     conda_install(envname = x,
+#                   packages = c("numpy", "pandas", "earthengine-api"),
+#                   forge = TRUE,
+#                   pip = TRUE,
+#                   conda = "auto")
+#     auth <- TRUE
+#     
+#   } else {
+#     # If conda environment exists, make sure the required python packages
+#     # are also installed, install missing packages where necessary
+#     message("Environment exists, checking for missing packages")
+#     use_condaenv(x, required = TRUE)
+#     packages <- character()
+#     if(!py_module_available("numpy"))  packages <- c(packages, "numpy")
+#     if(!py_module_available("pandas")) packages <- c(packages, "pandas")
+#     if(!py_module_available("ee")) {
+#       packages <- c(packages, "earthengine-api")
+#       auth <- TRUE
+#     } else auth <- FALSE
+#     
+#     if(length(packages)) {
+#       conda_install(envname = x,
+#                     packages = packages,
+#                     forge = TRUE,
+#                     pip = TRUE,
+#                     conda = "auto")
+#     }
+#   }
+#   
+#   # Authenticate GEE, will open browswer and you will copy and paste
+#   # an authentication key into the terminal. RIGHT CLICK TO PASTE KEY
+#   if(auth) {
+#     term_id <- terminalCreate()
+#     if(Sys.info()[["sysname"]] %in% c("Linux", "Darwin")) {
+#       cmd_dir <- file.path(session_py_dir, "bin")
+#       terminalSend(term_id, paste0(cmd_dir, "/earthengine authenticate\r"))
+#       
+#     } else if(Sys.info()[["sysname"]] == "Windows") {
+#     terminalSend(term_id, "earthengine authenticate\r")
+#     }
+#     Sys.sleep(5)
+#     while(terminalBusy(term_id)) {
+#       Sys.sleep(0.5)
+#     }
+#     terminalKill(term_id)
+#   }
+#   return(invisible())
+# }
+# 
+# env <- "sentinel_sechelt"
+# python_setup(env)
+
+# This is a new function, allowing users to process Sentinel 2 bands in an area 
+# over the course of a given time frame. It harnesses the computational power of 
+# Google Earth Engine, making the computations much faster than it would be 
+# locally This is now the recommended function.
+
+# get_sentinel_ee <- function(
+#   aoi = NULL, 
+#   out_epsg = NULL,
+#   template_raster = NULL, 
+#   date_ranges = NULL, 
+#   drive_dir = NULL, 
+#   download_dir = NULL) 
+#   {
+#   # Perform checks of function inputs
+#   if(!any(class(aoi) %in% c("sf", "sfc", "sfg")) || is.null(aoi)) {
+#     stop("\rError: You must specify an AOI as an sf, sfc, or sfg object")
+#     
+#   } else if(any(class(aoi) %in% c("sf", "sfc"))) {
+#     if(st_crs(aoi) != st_crs(4326)) aoi <- st_transform(aoi, 4326)
+#     
+#   } else if(any(class(aoi) %in% "sfg")) {
+#     aoi <- st_geometry(aoi) %>% st_set_crs(4326)
+#   }
+#   ee_geom <- sf_as_ee(aoi)
+#   ee_geom <- ee$Geometry$Polygon(coords = ee_geom)
+#   
+#   if(is.null(template_raster) || 
+#      !class(template_raster) %in% c("RasterLayer", "character")) {
+#     stop(
+#     "\rError: You must define the template_raster variable as either a 
+#     \r'RasterLayer' object, or a character string file path to a raster image"
+#     )
+#     
+#   } else if(class(template_raster) == "character") {
+#     template_raster <- raster(template_raster)
+#   }
+#   
+#   if(is.null(date_ranges) || !class(date_ranges) %in% "data.frame") {
+#     stop(
+#       "\rError: You must supply a data.frame with three columns:  
+#       \r  1: An ID column; 
+#       \r  2: A column of start dates; and 
+#       \r  3: A column of end dates.
+#       \rDates must be supplied as a character vector with the format 'YYYY-MM-DD'"
+#     )
+#   }
+#   
+#   if(is.null(drive_dir)) {
+#     drive_dir <- "Sentinel2"
+#   }
+#   
+#   if(is.null(download_dir) || !class(download_dir) %in% "character") {
+#     stop(
+#       "\rYou must supply an output directory for the files to be downloaded to"
+#     )
+#   }
+#   
+#   # Create a cloud masking function which will run in GEE
+#   cloud_mask <- function(image) {
+#     qa <- image$select("QA60")
+#     cloudBitMask <- bitwShiftL(1, 10)
+#     cirrusBitMask <- bitwShiftL(1, 11)
+#     mask <- qa$bitwiseAnd(cloudBitMask)$eq(0)$
+#       And(qa$bitwiseAnd(cirrusBitMask)$eq(0))
+#     image <- image$updateMask(mask)$divide(10000L)$
+#       select("B.*")$
+#       copyProperties(image, list("system:time_start"))
+#   }
+#   
+#   # Create the parent folder for the seasonal exports in your Google Drive folder
+#   try(drive_mkdir(drive_dir, path = "~", overwrite = FALSE), silent = TRUE)
+#   
+#   # Create a dataframe of Sentinel 2 band names and their associated resolutions
+#   bands <- data.frame(
+#     band = c("B1", "B2", "B3", "B4", "B5", "B6", 
+#              "B7", "B8", "B9", "B11", "B12", "B8A"), 
+#     new_name = c("b01", "b02", "b03", "b04", "b05", "b06", 
+#                  "b07", "b08", "b09", "b11", "b12", "b8A"),
+#     res = c(60, 10, 10, 10, 20, 20, 20, 10, 60, 20, 20, 20), 
+#     stringsAsFactors = FALSE)
+#   
+#   for(i in 1:nrow(date_ranges)) {
+#     date_id <- date_ranges[i, 1]
+#     message(paste0("\rStarting processing of ", date_id, " dates"))
+#     
+#     # Create the folder for the seasonal exports in your Google Drive folder
+#     drive_mkdir(date_id, path = "Sentinel2", overwrite = TRUE)
+#     
+#     # Create the folder for the seasonal downloads in your local folder
+#     out_dir <- file.path(download_dir, date_id)
+#     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+#     
+#     # Perform filtering operations in GEE
+#     sen <- ee$ImageCollection("COPERNICUS/S2_SR")$
+#       filterBounds(ee_geom)$
+#       filterDate(ee$Date(date_ranges[i, 2]), ee$Date(date_ranges[i, 3]))$
+#       filter(ee$Filter$lt("CLOUDY_PIXEL_PERCENTAGE", 20))$
+#       map(cloud_mask)
+#     
+#     # Take the median and clip the bands
+#     composite <- sen$median()
+#     comp_clip <- composite$clip(ee_geom)
+#     
+#     # Loop through to reproject and save each band
+#     for(j in 1:nrow(bands)) {
+#       task_img <- ee$batch$Export$image$toDrive(
+#         image = comp_clip$select(list(bands$band[j]))$
+#           reproject(paste0("EPSG:", out_epsg), NULL, bands$res[j]),
+#         folder = drive_get(paste0("Sentinel2/", date_id))$name,
+#         maxPixels = ncell(raster(template_raster)) * 2,
+#         fileNamePrefix = bands$new_name[j])
+#       
+#       # Save the bands to google drive and download them
+#       task_img$start()
+#       while(task_img$active()) {
+#         print(sprintf("Polling for task (id: %s).", task_img$id))
+#         Sys.sleep(5)
+#       }
+#       print(sprintf("State: %s", task_img$status()$state))
+#       img <- drive_download(
+#         file = file.path(drive_dir, date_id, paste0(bands$new_name[j], ".tif")), 
+#         path = file.path(out_dir, paste0(bands$new_name[j], ".tif")), 
+#         overwrite = TRUE)
+#     }
+#   }
+#   return(list.files(download_dir, pattern = ".tif$", full.names = TRUE, 
+#                     recursive = TRUE))
+# }
+
+
+# This function will take downloaded satellite images, transorm them, and output 
+# multiple satellite image indices as a raster stack.
+# bands_to_indices <- function(
+#   reference_raster, 
+#   satellite_files, 
+#   remove_index = NA) 
+#   {
+#   
+#   # Perform input checks
+#   if(missing(reference_raster)) 
+#     stop("A raster image must be provided to the argument 'reference_raster'")
+#   if(!is.character(reference_raster)) 
+#     stop("You must specify a file path to at least one reference raster image")
+#   
+#   if(missing(satellite_files)) 
+#     stop("You must provide a character vector of filenames to the satellite bands")
+#   if(!is.character(satellite_files))
+#     stop("You must supply a character vector of file paths to satellite raster images")
+#   
+#   #############################################################################
+#   
+#   ## Pan sharpening testing: sentinel 2 doesn't have a pan sharpening band, but
+#   # it might be possible to use band 8 or the mean of bands 2, 3, 4, and 8:
+#   # https://www.mdpi.com/2072-4292/8/4/354/htm#B34-remotesensing-08-00354
+#   # https://www.researchgate.net/publication/323933204_Sentinel-2_Pan_Sharpening_-_Comparative_Analysis
+#   suppressMessages(suppressWarnings({
+#     res_10 <- rast(satellite_files[sapply(satellite_files, function(x) 
+#       res(rast(x))[1], simplify = TRUE) %>% 
+#         grep(pattern = 10, value = FALSE)])
+#     res_20 <- stack(satellite_files[sapply(satellite_files, function(x) 
+#       res(raster(x))[1], simplify = TRUE) %>% 
+#         grep(pattern = 20, value = FALSE)])
+#     
+#     # Band 8 only as pan band:
+#     # pan <- raster(grep("b08", satellite_files, value = TRUE))
+#     
+#     # Mean of bands 2, 3, 4, and 8 as pan band, and convert to raster object:
+#     pan <- mean(res_10, na.rm = TRUE) %>% raster()
+#     res_10 <- raster::stack(sources(res_10)[, "source"])
+#     
+#     cat("\nApplying pan sharpening to low resolution bands")
+#     
+#     satellite_stack <- raster::stack(
+#       res_10, panSharpen(res_20, pan = pan, method = "pca", norm = FALSE)
+#     ) %>% magrittr::set_names(gsub("_pan$", "", names(.)))
+#     
+#     # Change band names to be more descriptive and match names in the
+#     # RStoolbox package
+#     band_lookup <- tribble(
+#       ~band_no, ~band_name,
+#       "b01", "ultrablue", "b02", "blue", "b03", "green", "b04", "red", 
+#       "b05", "redEdge1", "b06", "redEdge2", "b07", "redEdge3", "b08", "nir",
+#       "b09", "wv", "b11", "swir2", "b12", "swir3", "b8A", "narrow_nir")
+#     
+#     for(i in 1:nlayers(satellite_stack)) {
+#       if(any(grepl(names(satellite_stack)[i], band_lookup$band_no))) {
+#         names(satellite_stack)[i] <- band_lookup$band_name[
+#           which(band_lookup$band_no %in% names(satellite_stack)[i])
+#         ]
+#       }
+#     }
+#     
+#     # Produce vegetation indices from band layers
+#     cat("\nProducing spectral indices from raw bands")
+#     satellite_indices <- spectralIndices(
+#       img = satellite_stack, 
+#       blue = "blue", green = "green", red = "red", nir = "nir", 
+#       redEdge1 = "redEdge1", redEdge2 = "redEdge2", redEdge3 = "redEdge3", 
+#       swir2 = "swir2", swir3 = "swir3", 
+#       coefs = list(swir2ccc = minValue(satellite_stack$swir2), 
+#                    swir2coc = maxValue(satellite_stack$swir2))
+#     ) %>% dropLayer(remove_index)
+#     
+#     f_names <- tolower(paste0("sentinel2_", names(satellite_indices), "_",
+#                               basename(dirname(satellite_files[1]))))
+#     
+#     out <- lapply(reference_raster, function(i) {
+#       ref <- terra::rast(i)
+#       cat(paste(
+#         "\nResampling to", res(ref)[1], "m^2, masking, and writing outputs"))
+#       sat_terra <- rast(satellite_indices) %>% 
+#         terra::resample(ref)
+#       sat_mask <- terra::mask(sat_terra, ref) %>% 
+#         magrittr::set_names(f_names) %>% 
+#         terra::writeRaster(
+#           filename = file.path(dirname(i), paste0(f_names, ".tif")),
+#           overwrite = TRUE)
+#     }) %>% setNames(basename(dirname(reference_raster)))}))
+#   return(out)
+# }
+
+
+# Initialize the Google earth engine
+# ee <- import("ee")
+# ee$Initialize()
+
+# Authorize R to view/edit your Google Drive folders
+# term <- rstudioapi::terminalCreate()
+# rstudioapi::terminalSend(term, "R\r")
+# rstudioapi::terminalSend(term, "googledrive::drive_auth()\r")
+# rstudioapi::terminalKill(term)
+
+
+# season_dirs <- dir(file.path(raw_dir, "1_download"), 
+#                    full.names = TRUE)[dir(file.path(raw_dir, "1_download"))
+#                                       %in% seasons_df$season]
+
+# Run the bands_to_indices function to produce satellite indices for each 
+# of the date ranges. Function produces lots of warnings but they have to do
+# with projection stuff between raster and terra packages and can be ignored.
+# for(i in season_dirs) {
+#   sat_indices <- bands_to_indices(
+#     reference_raster = dem_list, 
+#     satellite_files = list.files(i, full.names = TRUE),
+#     remove_index = c("EVI2")
+#   )
+# }
+
+```
