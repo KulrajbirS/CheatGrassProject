@@ -87,7 +87,7 @@ install_miniconda(py_path)
 
 ```
 
-At this point you must set some options in RStudio. Go to Tools \> Global Options \> Python, and locate the python interpreter that you just installed (it will have the name "python.exe" in the `py_path` object that you defined above). Select that interpreter and hit "Apply", and then restart the RStudio session. RStudio will now use this instance of Python to install further packages for each environment created. Below, we will create an environment specifically for using the `rgee` package to access Google Earth Engine resources:
+At this point you must set some options in RStudio. Go to Tools \> Global Options \> Python, and locate the python interpreter that you just installed (it will have the name "python.exe" in the `py_path` object that you defined above). Select that interpreter and hit "Apply", and then restart the RStudio session. RStudio will now use this instance of Python to install further packages for each environment created. Below, we will create an environment specifically for using the `rgee` package to access Google Earth Engine resources (note that if errors occur, try deleting the environment folder and the .Renviron file in the project folder as well as your main "Documents" folder, then fully restart your RStudio session, then rerunning this whole chunk; the `rstudioapi::restartSession()` commands need time between, so make sure you run this chunk one line at a time as restarting the session has odd things that can happen):
 
 ```{r Earth Engine setup}
 
