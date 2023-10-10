@@ -26,8 +26,8 @@ sapply(dir_list, dir.create, showWarnings = FALSE)
 cpus <- as.numeric(Sys.getenv("NUMBER_OF_PROCESSORS"))
 
 # List of CRAN packages
-ls <- c("tidyverse", "lidR", "terra", "sf", "ranger", "mlr3verse",
-        "Rsagacmd", "future", "future.apply")
+ls <- c("tidyverse", "lidR", "terra", "sf", "ranger", "mlr3verse", "rstudioapi",
+        "Rsagacmd", "future", "future.apply", "rgee", "geojsonio")
 
 new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
 if(length(new_packages)) 
@@ -64,7 +64,7 @@ unzip(file.path(dl_dir, basename(url)),
 For SAGA GIS to work within the R packages its used by, it is recommended to download SAGA to your base folder on your hard drive (e.g.: C:/SAGA-GIS).
 
 ```{r SAGA_GIS}
-url <- "https://versaweb.dl.sourceforge.net/project/saga-gis/SAGA%20-%209/SAGA%20-%209.1.0/saga-9.1.0_x64.zip"
+url <- "https://versaweb.dl.sourceforge.net/project/saga-gis/SAGA%20-%209/SAGA%20-%209.2.0/saga-9.2.0_x64.zip"
 dl_dir <- file.path(Sys.getenv("SystemDrive"), "SAGA-GIS")
 dir.create(dl_dir, showWarnings = FALSE)
 download.file(url, destfile = file.path(dl_dir, basename(url)))
@@ -72,3 +72,44 @@ unzip(file.path(dl_dir, basename(url)),
       exdir = file.path(dl_dir, gsub(".zip$", "", basename(url))))
 
 ```
+
+## Python/rgee
+
+For accessing satellite imagery, we must make sure to have python installed and the correct environment variables set for this project.
+
+```{r python setup}
+
+library(reticulate)
+
+py_path <- "D:/Python/R-miniconda"
+dir.create(py_path, showWarnings = FALSE, recursive = TRUE)
+install_miniconda(py_path)
+
+```
+
+At this point you must set some options in RStudio. Go to Tools \> Global Options \> Python, and locate the python interpreter that you just installed (it will have the name "python.exe" in the `py_path` object that you defined above). Select that interpreter and hit "Apply", and then restart the RStudio session. RStudio will now use this instance of Python to install further packages for each environment created. Below, we will create an environment specifically for using the `rgee` package to access Google Earth Engine resources:
+
+```{r Earth Engine setup}
+
+library(rgee)
+
+py_path <- "D:/Python/R-miniconda"
+py_env <- "rgee"
+
+# Create the .Renviron file in the project directory, pointing to the future
+# python.exe path and environment folder
+ee_install_set_pyenv(py_path = file.path(py_path, "envs", py_env, "python.exe"),
+                     py_env = file.path(py_path, "envs", py_env), 
+                     Renviron = "local", confirm = FALSE)
+
+# Restart the RStudio session
+rstudioapi::restartSession()
+
+# Install the required GEE python packages and restart the RStudio session
+ee_install(py_env = file.path(py_path, "envs", py_env), confirm = FALSE)
+rstudioapi::restartSession()
+ee_Initialize(drive = TRUE)
+
+```
+
+Read carefully through the web pages that pop up to make sure that everything gets connected properly. The general method for using `rgee` essentially involves running an algorithm in GEE, saving that result to a directory in your Google Drive, and then finally downloading that result to your RStudio session. This will be more obvious in the scripts that deal with this. Moving forward, as long as this has all ran successfully, you should only need to run the `ee_initialize(drive = TRUE)` line in a new session to refresh the stale OAuth token, and then you should be good to run GEE functions through your R session.
